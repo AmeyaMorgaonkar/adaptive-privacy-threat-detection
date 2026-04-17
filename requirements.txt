@@ -1,0 +1,15 @@
+# Core
+psutil==6.1.1
+scapy==2.6.1
+netifaces==0.11.0
+requests==2.32.3
+
+# Analysis & ML
+numpy==2.2.3
+scikit-learn==1.6.1
+pandas==2.2.3
+
+# Utilities
+python-dotenv==1.0.1
+schedule==1.2.2
+colorlog==6.9.0

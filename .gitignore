@@ -1,0 +1,43 @@
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Local Copilot/agent metadata
+.agent/
+.skills/
+
+# Project planning docs (not for remote)
+milestones/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs & data (keep structure, ignore contents)
+data/*.log
+data/*.csv
+data/*.json
+!data/.gitkeep
+
+# Environment
+.env
+
+# Distribution
+*.spec
