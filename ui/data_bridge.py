@@ -1,0 +1,172 @@
+"""
+Data Bridge (Milestone 02)
+
+Thread-safe interface connecting background monitor threads to the UI
+dashboard.  Uses ``queue.Queue`` internally so callers never block.
+The dashboard (Milestone 03) will poll ``latest()`` or register a
+callback via ``subscribe()``.
+"""
+
+from __future__ import annotations
+
+import queue
+import sys
+import threading
+from pathlib import Path
+from typing import Callable, Optional
+
+try:
+    import config
+    from logger import get_logger
+except ModuleNotFoundError:
+    project_root = Path(__file__).resolve().parents[1]
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    import config
+    from logger import get_logger
+
+from modules.threat_scoring import ThreatScore
+
+log = get_logger(__name__)
+
+
+class DataBridge:
+    """Thread-safe queue connecting background monitor threads to the UI.
+
+    Design constraints (from milestone spec):
+    - ``push()`` and ``latest()`` must be safe under concurrent access.
+    - Must never block callers — uses ``queue.Queue`` with ``block=False``.
+    - Score history is capped at ``config.SCORE_HISTORY_LENGTH``.
+    """
+
+    def __init__(self) -> None:
+        self._queue: queue.Queue[ThreatScore] = queue.Queue(
+            maxsize=config.SCORE_HISTORY_LENGTH,
+        )
+        self._latest: Optional[ThreatScore] = None
+        self._lock = threading.Lock()
+        self._subscribers: list[Callable[[ThreatScore], None]] = []
+        self._sub_lock = threading.Lock()
+
+        # Rolling history (most recent N scores)
+        self._history: list[ThreatScore] = []
+        self._history_lock = threading.Lock()
+
+    # ── Producer API (called from background threads) ────────────────
+
+    def push(self, score: ThreatScore) -> None:
+        """Enqueue a new ThreatScore and notify subscribers.
+
+        Never blocks: if the internal queue is full, the oldest item is
+        discarded to make room.
+        """
+        # Evict oldest if queue is at capacity
+        if self._queue.full():
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                pass
+
+        try:
+            self._queue.put_nowait(score)
+        except queue.Full:
+            log.warning("DataBridge queue unexpectedly full after eviction")
+
+        # Update latest reference (atomic-ish via lock)
+        with self._lock:
+            self._latest = score
+
+        # Append to bounded history
+        with self._history_lock:
+            self._history.append(score)
+            max_len = config.SCORE_HISTORY_LENGTH
+            if len(self._history) > max_len:
+                self._history = self._history[-max_len:]
+
+        # Notify subscribers (fire-and-forget, errors are logged)
+        self._notify(score)
+
+        log.debug(
+            "DataBridge.push — unified=%.1f  tier=%s  queue_depth=%d",
+            score.unified_score,
+            score.tier,
+            self._queue.qsize(),
+        )
+
+    # ── Consumer API (called from UI / main thread) ──────────────────
+
+    def latest(self) -> Optional[ThreatScore]:
+        """Return the most recently pushed ThreatScore, or ``None``."""
+        with self._lock:
+            return self._latest
+
+    def drain(self) -> list[ThreatScore]:
+        """Drain all pending scores from the queue (non-blocking).
+
+        Useful for batch-consuming items the UI hasn't processed yet.
+        """
+        items: list[ThreatScore] = []
+        while True:
+            try:
+                items.append(self._queue.get_nowait())
+            except queue.Empty:
+                break
+        return items
+
+    def history(self, n: int = 0) -> list[ThreatScore]:
+        """Return the last *n* scores (0 = all available history).
+
+        Thread-safe snapshot — callers get a copy of the list.
+        """
+        with self._history_lock:
+            if n <= 0:
+                return list(self._history)
+            return list(self._history[-n:])
+
+    # ── Subscription API ─────────────────────────────────────────────
+
+    def subscribe(self, callback: Callable[[ThreatScore], None]) -> None:
+        """Register a callback invoked on every ``push()``.
+
+        Callbacks run in the **pushing thread**, so they must return
+        quickly or hand off to the UI event loop (e.g., via
+        ``root.after()`` in Tkinter/CTk).
+        """
+        with self._sub_lock:
+            self._subscribers.append(callback)
+        log.debug("DataBridge subscriber added (total=%d)", len(self._subscribers))
+
+    def unsubscribe(self, callback: Callable[[ThreatScore], None]) -> None:
+        """Remove a previously registered callback."""
+        with self._sub_lock:
+            try:
+                self._subscribers.remove(callback)
+            except ValueError:
+                pass
+
+    def _notify(self, score: ThreatScore) -> None:
+        """Fire all subscriber callbacks (best-effort)."""
+        with self._sub_lock:
+            subs = list(self._subscribers)
+
+        for cb in subs:
+            try:
+                cb(score)
+            except Exception as exc:
+                log.error("DataBridge subscriber error: %s", exc)
+
+    # ── Utilities ────────────────────────────────────────────────────
+
+    @property
+    def queue_depth(self) -> int:
+        """Number of unconsumed items in the queue."""
+        return self._queue.qsize()
+
+    def clear(self) -> None:
+        """Discard all queued data and reset history."""
+        self.drain()
+        with self._lock:
+            self._latest = None
+        with self._history_lock:
+            self._history.clear()
+        log.debug("DataBridge cleared")

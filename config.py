@@ -30,9 +30,37 @@ HARDENED_DNS_SERVERS = ["1.1.1.1", "8.8.8.8"]
 AUTO_ENABLE_DNS_PROTECTION = True
 
 # ── Threat Scoring (Milestone 02) ───────────────────────────────────
-THREAT_SCORE_LOW = 30
-THREAT_SCORE_MEDIUM = 60
-THREAT_SCORE_HIGH = 85
+# Scoring weights (must sum to 1.0)
+SCORE_WEIGHT_WIFI = 0.35
+SCORE_WEIGHT_BEHAVIORAL = 0.40
+SCORE_WEIGHT_WEB = 0.25
+
+# Tier thresholds (upper bound inclusive)
+TIER_SAFE_MAX = 24
+TIER_LOW_MAX = 49
+TIER_ELEVATED_MAX = 74
+TIER_HIGH_MAX = 89
+# Score > 89 → Critical
+
+# Dashboard refresh rate (consumed by Milestone 03)
+DASHBOARD_REFRESH_MS = 1000
+SCORE_HISTORY_LENGTH = 300        # ~5 minutes at 1s intervals
+
+# Response cooldowns (seconds) — per-action deduplication windows
+RESPONSE_COOLDOWNS = {
+    "wifi_alert_50":        300,   # 5 min
+    "wifi_alert_75":        120,
+    "wifi_alert_90":        60,    # 1 min
+    "behavioral_alert_50":  120,
+    "behavioral_alert_75":  60,
+    "behavioral_alert_90":  30,
+    "web_alert_40":         600,   # 10 min — less urgent
+    "web_alert_65":         300,
+    "web_alert_85":         120,
+    "unified_badge_50":     300,
+    "unified_alert_75":     180,
+    "unified_alert_90":     60,
+}
 
 # ── Behavioral Profiling (Milestone 03) ─────────────────────────────
 ANOMALY_CONTAMINATION = 0.05
