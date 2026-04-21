@@ -1,36 +1,81 @@
-import customtkinter as ctk
+"""
+GlassFrame — reusable floating-glass card widget (QFrame subclass).
+
+Every card in the Sentinel dashboard is a GlassFrame.  Supports
+live theme/glass toggle changes via the refresh_all() classmethod.
+Uses real rgba opacity in QSS for genuine glassmorphism.
+"""
+
+import weakref
+from PySide6.QtWidgets import QFrame, QGraphicsDropShadowEffect
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from ui.theme import get_card_tokens
+import config
 
-class GlassFrame(ctk.CTkFrame):
+
+class GlassFrame(QFrame):
     """
-    A CTkFrame styled as a floating glass card.
+    QFrame styled as a floating glass card.
+
+    Light + glass:  white card (rgba 82% opacity) over off-white root
+                    with soft drop shadow → clean float.
+    Dark + glass:   semi-transparent slate card + white rim-light border
+                    with deeper shadow → frosted depth.
+    Glass off:      flat opaque card, standard corner radius, no shadow.
     """
 
-    _instances: list["GlassFrame"] = []
+    _instances: list[weakref.ref] = []
 
-    def __init__(self, master, **kwargs):
-        tokens = get_card_tokens()
-        kwargs.setdefault("fg_color",      tokens["card_bg"])
-        kwargs.setdefault("border_color",  tokens["card_border"])
-        kwargs.setdefault("border_width",  1)
-        kwargs.setdefault("corner_radius", tokens.get("corner_radius", 12))
-        super().__init__(master, **kwargs)
-        GlassFrame._instances.append(self)
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setObjectName("GlassFrame")
+        self._apply_tokens()
+        GlassFrame._instances.append(weakref.ref(self))
 
-    def apply_tokens(self):
-        """Re-apply current token set. Called on theme or glass toggle."""
+    def _apply_tokens(self):
         tokens = get_card_tokens()
-        self.configure(
-            fg_color=tokens["card_bg"],
-            border_color=tokens["card_border"],
-            corner_radius=tokens.get("corner_radius", 12),
-        )
+        bg = tokens.get("card_bg_rgba", tokens["card_bg"])
+        border = tokens["card_border"]
+        radius = tokens.get("card_radius", 12)
+        shadow_color = tokens.get("shadow", "rgba(0, 0, 0, 0.05)")
+
+        self.setStyleSheet(f"""
+            GlassFrame {{
+                background-color: {bg};
+                border: 1px solid {border};
+                border-radius: {radius}px;
+            }}
+        """)
+
+        # Drop shadow for glassmorphism depth
+        glass_on = getattr(config, "GLASSMORPHISM_ENABLED", False)
+        if glass_on:
+            shadow = QGraphicsDropShadowEffect(self)
+            mode = getattr(config, "APPEARANCE_MODE", "dark")
+            if mode == "dark":
+                shadow.setColor(QColor(0, 0, 0, 60))
+                shadow.setBlurRadius(24)
+                shadow.setOffset(0, 6)
+            else:
+                shadow.setColor(QColor(0, 0, 0, 20))
+                shadow.setBlurRadius(16)
+                shadow.setOffset(0, 4)
+            self.setGraphicsEffect(shadow)
+        else:
+            self.setGraphicsEffect(None)
 
     @classmethod
     def refresh_all(cls):
-        """Propagate token changes to every live GlassFrame instance."""
-        for frame in cls._instances:
-            try:
-                frame.apply_tokens()
-            except Exception:
-                pass   # widget may have been destroyed; skip silently
+        """Re-apply current tokens to every live GlassFrame instance."""
+        alive = []
+        for ref in cls._instances:
+            frame = ref()
+            if frame is not None:
+                try:
+                    frame._apply_tokens()
+                    alive.append(ref)
+                except RuntimeError:
+                    pass  # C++ object deleted
+        cls._instances = alive

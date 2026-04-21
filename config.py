@@ -18,7 +18,7 @@ WINDOW_WIDTH = 1100
 WINDOW_HEIGHT = 700
 
 # ── Wi-Fi Analysis (Milestone 01) ───────────────────────────────────
-SCAN_INTERVAL_SECONDS = 30            # How often to re-scan (seconds)
+SCAN_INTERVAL_SECONDS = 10            # How often to re-scan (seconds)
 WIFI_SIGNAL_WARN_DBM = -70            # Warn below this signal
 WIFI_SIGNAL_CRITICAL_DBM = -85        # Critical below this
 EVIL_TWIN_RSSI_DELTA = 10             # dBm difference to flag twin
@@ -43,8 +43,9 @@ TIER_HIGH_MAX = 89
 # Score > 89 → Critical
 
 # Dashboard refresh rate (consumed by Milestone 03)
-DASHBOARD_REFRESH_MS = 1000
-SCORE_HISTORY_LENGTH = 300        # ~5 minutes at 1s intervals
+DASHBOARD_REFRESH_MS = 1000           # UI poll interval (ms)
+MONITOR_INTERVAL_SECONDS = SCAN_INTERVAL_SECONDS  # Background scan interval
+SCORE_HISTORY_LENGTH = 300            # ~5 minutes at 1s intervals
 
 # Response cooldowns (seconds) — per-action deduplication windows
 RESPONSE_COOLDOWNS = {
@@ -69,6 +70,11 @@ PROFILE_HISTORY_WINDOW = 100
 # ── Web Tracker (Milestone 04) ──────────────────────────────────────
 TRACKER_DB_PATH = DATA_DIR / "tracker.db"
 DNS_CACHE_TTL_SECONDS = 300
+
+# ── Appearance (Milestone 03) ───────────────────────────────────────
+APPEARANCE_MODE = "dark"          # "light" | "dark" | "system"
+GLASSMORPHISM_ENABLED = True      # Floating-glass card effect
+GLASS_BACKGROUND_BLUR = False     # Blurred background in dark+glass mode
 
 # ── Logging (Milestone 05) ──────────────────────────────────────────
 LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG")

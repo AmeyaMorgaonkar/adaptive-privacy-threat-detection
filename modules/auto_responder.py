@@ -307,21 +307,18 @@ class AutoResponder:
     # ── Alert & logging helpers ──────────────────────────────────────
 
     def _send_desktop_alert(self, title: str, message: str, severity: str) -> None:
-        """Emit a desktop notification using a CTk dialog.
+        """Emit a desktop notification.
+
+        Runs in a background thread, so we cannot create Qt widgets here.
+        Instead we log prominently; the UI reads alerts from the incident
+        log / DataBridge history.
         """
         log.warning("🔔 ALERT [%s] %s — %s", severity, title, message)
-        try:
-            import customtkinter as ctk
-            dialog = ctk.CTkToplevel()
-            dialog.title(f"{severity} Alert: {title}")
-            dialog.geometry("400x200")
-            dialog.attributes("-topmost", True)
-            
-            ctk.CTkLabel(dialog, text=f"🔔 {title}", font=ctk.CTkFont(size=16, weight="bold"), text_color="red" if severity == "Critical" else "orange").pack(pady=(20, 10))
-            ctk.CTkLabel(dialog, text=message, wraplength=350).pack(pady=10)
-            ctk.CTkButton(dialog, text="Dismiss", command=dialog.destroy).pack(pady=10)
-        except Exception as e:
-            log.error(f"Failed to show CTk dialog: {e}")
+        self._log_response(f"desktop_alert_{severity.lower().replace(' ', '_')}", {
+            "title": title,
+            "message": message,
+            "severity": severity,
+        })
 
     def _log_response(self, action: str, context: dict) -> None:
         """Append a structured response record to the incident log."""

@@ -52,6 +52,10 @@ class DataBridge:
         self._history: list[ThreatScore] = []
         self._history_lock = threading.Lock()
 
+        # Full module reports (set by monitor loop)
+        self._reports: dict = {}
+        self._reports_lock = threading.Lock()
+
     # ── Producer API (called from background threads) ────────────────
 
     def push(self, score: ThreatScore) -> None:
@@ -155,6 +159,21 @@ class DataBridge:
             except Exception as exc:
                 log.error("DataBridge subscriber error: %s", exc)
 
+    # ── Module Reports API ───────────────────────────────────────────
+
+    def set_reports(self, **reports) -> None:
+        """Store full module reports (wifi_report, behavioral_report, etc.).
+
+        Called from the monitor thread alongside push().
+        """
+        with self._reports_lock:
+            self._reports.update(reports)
+
+    def get_reports(self) -> dict:
+        """Return a snapshot of the latest module reports."""
+        with self._reports_lock:
+            return dict(self._reports)
+
     # ── Utilities ────────────────────────────────────────────────────
 
     @property
@@ -169,4 +188,6 @@ class DataBridge:
             self._latest = None
         with self._history_lock:
             self._history.clear()
+        with self._reports_lock:
+            self._reports.clear()
         log.debug("DataBridge cleared")
