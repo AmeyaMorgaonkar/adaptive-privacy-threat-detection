@@ -619,79 +619,162 @@ class WiFiAnalyzer:
 
     # ── macOS Scanning ───────────────────────────────────────────────
 
-    def _scan_macos(self) -> list[dict]:
-        """Use the airport utility to scan on macOS."""
-        airport = (
-            "/System/Library/PrivateFrameworks/"
-            "Apple80211.framework/Versions/Current/Resources/airport"
-        )
-        try:
-            result = subprocess.run(
-                [airport, "-s"],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            return self._parse_airport(result.stdout)
-        except Exception as exc:
-            log.error("macOS scan failed: %s", exc)
-            return []
+    def _get_macos_airport_data(self) -> dict:
+        """Fetch Wi-Fi data via `system_profiler SPAirPortDataType -json`.
 
-    def _connected_macos(self) -> dict:
-        """Fetch connected network info on macOS."""
-        airport = (
-            "/System/Library/PrivateFrameworks/"
-            "Apple80211.framework/Versions/Current/Resources/airport"
-        )
+        Returns the first Wi-Fi interface dict (en0) or an empty dict.
+        The deprecated `airport` CLI no longer produces output on
+        macOS Sonoma and later, so we use system_profiler instead.
+        """
         try:
             result = subprocess.run(
-                [airport, "-I"],
+                ["system_profiler", "SPAirPortDataType", "-json"],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=30,
             )
-            info: dict = {}
-            for line in result.stdout.splitlines():
-                line = line.strip()
-                if line.startswith("SSID:"):
-                    info["ssid"] = line.split(":")[1].strip()
-                elif line.startswith("BSSID:"):
-                    info["bssid"] = line.split(":", 1)[1].strip()
-                elif line.startswith("agrCtlRSSI:"):
-                    info["signal_dbm"] = int(line.split(":")[1].strip())
-                elif line.startswith("link auth:"):
-                    info["encryption"] = line.split(":")[1].strip()
-            return info if info.get("ssid") else {}
+            data = json.loads(result.stdout)
+            interfaces = (
+                data.get("SPAirPortDataType", [{}])[0]
+                .get("spairport_airport_interfaces", [])
+            )
+            # Return the first real Wi-Fi interface (skip AWDL, etc.)
+            for iface in interfaces:
+                if iface.get("_name", "").startswith("en"):
+                    return iface
+            return interfaces[0] if interfaces else {}
+        except (subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+            log.error("system_profiler Wi-Fi query failed: %s", exc)
+            return {}
         except Exception as exc:
-            log.error("Failed to query macOS interface: %s", exc)
+            log.error("macOS Wi-Fi data fetch failed: %s", exc)
             return {}
 
     @staticmethod
-    def _parse_airport(output: str) -> list[dict]:
-        """Parse `airport -s` output (tabular)."""
+    def _parse_security_mode(raw: str) -> str:
+        """Map system_profiler security strings to simple labels.
+
+        Example inputs:
+            spairport_security_mode_wpa2_personal  -> WPA2
+            spairport_security_mode_wpa3_personal  -> WPA3
+            spairport_security_mode_open           -> OPEN
+        """
+        raw = raw.lower()
+        if "wpa3" in raw:
+            return "WPA3"
+        if "wpa2" in raw:
+            return "WPA2"
+        if "wpa" in raw:
+            return "WPA"
+        if "wep" in raw:
+            return "WEP"
+        if "open" in raw or "none" in raw:
+            return "OPEN"
+        return "UNKNOWN"
+
+    @staticmethod
+    def _parse_signal_noise(value: str) -> tuple[int, int]:
+        """Parse a 'signal / noise' string like '-59 dBm / -94 dBm'.
+
+        Returns (signal_dbm, noise_dbm). Falls back to (-100, -100).
+        """
+        try:
+            parts = value.split("/")
+            signal = int(parts[0].strip().replace("dBm", "").strip())
+            noise = int(parts[1].strip().replace("dBm", "").strip())
+            return signal, noise
+        except (IndexError, ValueError):
+            return -100, -100
+
+    @staticmethod
+    def _parse_channel_info(value: str) -> int:
+        """Extract channel number from e.g. '44 (5GHz, 80MHz)'."""
+        try:
+            return int(value.strip().split()[0])
+        except (IndexError, ValueError):
+            return 0
+
+    def _scan_macos(self) -> list[dict]:
+        """Scan nearby Wi-Fi networks on macOS via system_profiler."""
+        iface_data = self._get_macos_airport_data()
+        if not iface_data:
+            return []
+
+        raw_networks = iface_data.get(
+            "spairport_airport_other_local_wireless_networks", []
+        )
+
         networks: list[dict] = []
-        lines = output.strip().splitlines()
-        if len(lines) < 2:
-            return networks
+        for net in raw_networks:
+            ssid = net.get("_name", "")
+            security = self._parse_security_mode(
+                net.get("spairport_security_mode", "")
+            )
+            channel = self._parse_channel_info(
+                net.get("spairport_network_channel", "")
+            )
 
-        for line in lines[1:]:
-            parts = line.split()
-            if len(parts) < 7:
-                continue
-            try:
-                networks.append(
-                    {
-                        "ssid": parts[0],
-                        "bssid": parts[1],
-                        "signal_dbm": int(parts[2]),
-                        "channel": int(parts[3].split(",")[0]),
-                        "encryption": parts[-1],
-                    }
-                )
-            except (ValueError, IndexError):
-                continue
+            signal_dbm = -100
+            sn = net.get("spairport_signal_noise", "")
+            if sn:
+                signal_dbm, _ = self._parse_signal_noise(sn)
 
+            networks.append(
+                {
+                    "ssid": ssid,
+                    "bssid": "",  # system_profiler doesn't expose per-AP BSSIDs
+                    "signal_dbm": signal_dbm,
+                    "channel": channel,
+                    "encryption": security,
+                }
+            )
+
+        log.debug("Parsed %d nearby networks via system_profiler", len(networks))
         return networks
+
+    def _connected_macos(self) -> dict:
+        """Fetch connected network info on macOS via system_profiler."""
+        iface_data = self._get_macos_airport_data()
+        if not iface_data:
+            return {}
+
+        # Check that the interface is actually connected
+        status = iface_data.get("spairport_status_information", "")
+        if "connected" not in status.lower():
+            log.info("macOS Wi-Fi status: %s — not connected", status)
+            return {}
+
+        current = iface_data.get("spairport_current_network_information", {})
+        if not current:
+            return {}
+
+        ssid = current.get("_name", "")
+        if not ssid:
+            return {}
+
+        security = self._parse_security_mode(
+            current.get("spairport_security_mode", "")
+        )
+        channel = self._parse_channel_info(
+            current.get("spairport_network_channel", "")
+        )
+
+        signal_dbm = -100
+        noise_dbm = -100
+        sn = current.get("spairport_signal_noise", "")
+        if sn:
+            signal_dbm, noise_dbm = self._parse_signal_noise(sn)
+
+        mac_address = iface_data.get("spairport_wireless_mac_address", "")
+
+        return {
+            "ssid": ssid,
+            "bssid": mac_address,  # local MAC (per-AP BSSID not available)
+            "signal_dbm": signal_dbm,
+            "noise_dbm": noise_dbm,
+            "channel": channel,
+            "encryption": security,
+        }
 
 
 # ── Utilities ────────────────────────────────────────────────────────
