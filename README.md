@@ -1,6 +1,6 @@
 # Adaptive Privacy & Threat Detection System
 
-A desktop application that monitors network activity, detects threats, profiles system behaviour, and tracks web privacy — all from a single Tkinter dashboard.
+A desktop application that monitors network activity, detects threats, profiles system behaviour, and tracks web privacy: all from a single PySide6 dashboard.
 
 ## Features (Planned)
 
