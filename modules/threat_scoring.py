@@ -29,33 +29,37 @@ except ModuleNotFoundError:
 log = get_logger(__name__)
 
 
-# ── Report stubs for modules not yet implemented ─────────────────────
-# WiFiReport is already real (wifi_analysis.py).
-# BehavioralReport and WebReport are stubs until M04 / M05 land.
+# BehavioralReport — import from real module (M04), fallback to stub
+try:
+    from modules.behavioral_profiling import BehavioralReport
+except Exception:
+    @dataclass
+    class BehavioralReport:  # type: ignore[no-redef]
+        """Fallback stub if behavioral_profiling module is unavailable."""
+        timestamp: str = ""
+        anomalous_processes: list[str] = field(default_factory=list)
+        raw_score: float = 0.0
+        severity: str = "LOW"
 
-@dataclass
-class BehavioralReport:
-    """Placeholder report until Milestone 04 is implemented."""
-    timestamp: str = ""
-    anomalous_processes: list[str] = field(default_factory=list)
-    raw_score: float = 0.0
-    severity: str = "LOW"
-
-    def to_dict(self) -> dict:
-        return asdict(self)
+        def to_dict(self) -> dict:
+            return asdict(self)
 
 
-@dataclass
-class WebReport:
-    """Placeholder report until Milestone 05 is implemented."""
-    timestamp: str = ""
-    trackers_detected: list[dict] = field(default_factory=list)
-    tracker_categories: list[str] = field(default_factory=list)
-    raw_score: float = 0.0
-    severity: str = "LOW"
+# WebReport — import from real module (M05), fallback to stub
+try:
+    from modules.web_tracker import WebReport
+except Exception:
+    @dataclass
+    class WebReport:  # type: ignore[no-redef]
+        """Fallback stub if web_tracker module is unavailable."""
+        timestamp: str = ""
+        trackers_detected: list[dict] = field(default_factory=list)
+        tracker_categories: list[str] = field(default_factory=list)
+        raw_score: float = 0.0
+        severity: str = "LOW"
 
-    def to_dict(self) -> dict:
-        return asdict(self)
+        def to_dict(self) -> dict:
+            return asdict(self)
 
 
 # ── Severity helpers ─────────────────────────────────────────────────
@@ -220,9 +224,29 @@ class ThreatScorer:
                 threats.append(f"Anomalous process: {proc}")
 
         if web_report is not None:
-            for tracker in getattr(web_report, "trackers_detected", []):
-                domain = tracker if isinstance(tracker, str) else tracker.get("domain", "unknown")
-                threats.append(f"Tracker detected: {domain}")
+            # Support both new TrackerHit list and legacy dict list
+            tracker_hits = getattr(web_report, "tracker_hits", [])
+            if tracker_hits:
+                for hit in tracker_hits:
+                    domain = getattr(hit, "domain", None)
+                    cat = getattr(hit, "tracker_category", "")
+                    if domain:
+                        threats.append(f"Tracker [{cat}]: {domain}")
+            else:
+                # Legacy fallback
+                for tracker in getattr(web_report, "trackers_detected", []):
+                    domain = tracker if isinstance(tracker, str) else tracker.get("domain", "unknown")
+                    threats.append(f"Tracker detected: {domain}")
+
+            # Fingerprint signals
+            for sig in getattr(web_report, "fingerprint_signals", []):
+                if getattr(sig, "detected", False):
+                    sig_type = getattr(sig, "signal_type", "unknown")
+                    confidence = getattr(sig, "confidence", 0)
+                    threats.append(
+                        f"Fingerprint attempt: {sig_type} "
+                        f"(confidence: {confidence:.0%})"
+                    )
 
         return threats
 
@@ -253,8 +277,38 @@ class ThreatScorer:
         elif behavioral_score >= 50:
             recs.append("Monitor flagged processes — they may be consuming unusual resources.")
 
-        # Web tracker recommendations
-        if web_score >= 65:
+        # Web tracker recommendations — per-category (M05)
+        cat_scores = getattr(web_report, "category_scores", {}) if web_report else {}
+        if cat_scores:
+            if cat_scores.get("Analytics", 0) >= 40:
+                recs.append(
+                    "Consider a browser extension to block analytics scripts "
+                    "(uBlock Origin)."
+                )
+            if cat_scores.get("Advertising", 0) >= 50:
+                recs.append(
+                    "Enable DNS-level ad blocking (e.g. Pi-hole, NextDNS)."
+                )
+            if cat_scores.get("Social", 0) >= 50:
+                recs.append(
+                    "Use Firefox containers to isolate social logins from browsing."
+                )
+            if cat_scores.get("Telemetry", 0) >= 55:
+                recs.append(
+                    "Review app telemetry settings; consider blocking telemetry "
+                    "IPs at firewall."
+                )
+            if cat_scores.get("Fingerprint", 0) >= 40:
+                recs.append(
+                    "Enable Firefox resist fingerprinting "
+                    "(privacy.resistFingerprinting=true)."
+                )
+            if cat_scores.get("Fingerprint", 0) >= 70:
+                recs.append(
+                    "Browser fingerprinting is significant — see the hardening "
+                    "guide in the Web Tracker dashboard panel."
+                )
+        elif web_score >= 65:
             recs.append("Consider using a privacy-focused browser or enabling tracker blocking.")
         elif web_score >= 40:
             recs.append("Review the list of detected trackers in the dashboard.")

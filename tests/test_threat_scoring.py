@@ -71,9 +71,21 @@ def _make_behavioral_report(raw_score: float = 0.0, procs: list[str] | None = No
 
 
 def _make_web_report(raw_score: float = 0.0, trackers: list[dict] | None = None):
-    report = WebReport(raw_score=raw_score)
+    # New WebReport uses web_score (0–100); raw_score is a property = web_score/100
+    report = WebReport(web_score=raw_score * 100.0)
     if trackers:
-        report.trackers_detected = trackers
+        # Build TrackerHit objects for the new WebReport interface
+        from modules.web_tracker import TrackerHit
+        hits = []
+        for t in trackers:
+            domain = t.get("domain", "unknown") if isinstance(t, dict) else str(t)
+            hits.append(TrackerHit(
+                domain=domain,
+                tracker_category=t.get("tracker_category", "Analytics") if isinstance(t, dict) else "Analytics",
+                severity="MEDIUM",
+                first_seen="2026-01-01T00:00:00Z",
+            ))
+        report.tracker_hits = hits
     return report
 
 

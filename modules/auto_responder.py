@@ -207,9 +207,14 @@ class AutoResponder:
         return fired
 
     def _handle_web(self, web_score: float, report=None) -> list[str]:
-        """Web tracker module response chain."""
+        """Web tracker module response chain.
+
+        Dispatches both score-based alerts (legacy) and per-category
+        alerts using the rich WebReport from M05.
+        """
         fired: list[str] = []
 
+        # ── Score-based alerts (legacy thresholds) ───────────────────
         if web_score >= 85:
             if self._try_fire("web_alert_85"):
                 self._send_desktop_alert(
@@ -238,7 +243,7 @@ class AutoResponder:
 
         if web_score >= 40:
             if self._try_fire("web_alert_40"):
-                categories = getattr(report, "tracker_categories", []) if report else []
+                categories = getattr(report, "active_categories", []) if report else []
                 # This is an in-dashboard notification (no desktop alert)
                 log.info(
                     "In-dashboard notification: trackers by category — %s",
@@ -249,6 +254,198 @@ class AutoResponder:
         self._update_above_state("web_alert_40", web_score >= 40)
         self._update_above_state("web_alert_65", web_score >= 65)
         self._update_above_state("web_alert_85", web_score >= 85)
+
+        # ── Per-category alerts (M05) ────────────────────────────────
+        fired.extend(self._handle_web_categories(report))
+
+        # ── Multi-category escalation ────────────────────────────────
+        fired.extend(self._handle_web_multi_escalation(report))
+
+        return fired
+
+    def _handle_web_categories(self, report=None) -> list[str]:
+        """Dispatch per-category web alerts based on category_scores.
+
+        Each tracker category (Analytics, Advertising, Social, Telemetry,
+        Fingerprint) has its own alert threshold and targeted suggestion.
+        """
+        fired: list[str] = []
+        if report is None:
+            return fired
+
+        cat_scores = getattr(report, "category_scores", {})
+        if not cat_scores:
+            return fired
+
+        thresholds = getattr(config, "TRACKER_ALERT_THRESHOLDS", {})
+        top_offenders = getattr(report, "top_offenders", [])
+
+        # ── Analytics ────────────────────────────────────────────────
+        analytics_score = cat_scores.get("Analytics", 0)
+        if analytics_score >= thresholds.get("Analytics", 40):
+            if self._try_fire("web_analytics_alert"):
+                log.info(
+                    "In-dashboard notification: Analytics trackers detected "
+                    "(score=%.0f) — domains: %s",
+                    analytics_score, top_offenders[:3],
+                )
+                self._log_response("web_analytics_alert", {
+                    "category": "Analytics",
+                    "score": analytics_score,
+                })
+                fired.append("web_analytics_alert")
+
+        # ── Advertising ──────────────────────────────────────────────
+        ad_score = cat_scores.get("Advertising", 0)
+        if ad_score >= thresholds.get("Advertising", 50):
+            if self._try_fire("web_advertising_alert"):
+                log.info(
+                    "In-dashboard notification: Advertising trackers "
+                    "(score=%.0f)", ad_score,
+                )
+                if ad_score >= 75:
+                    self._send_desktop_alert(
+                        title="Ad Network Tracking",
+                        message=(
+                            f"Ad network trackers actively profiling you. "
+                            f"Score: {ad_score:.0f}/100."
+                        ),
+                        severity="High Risk",
+                    )
+                self._log_response("web_advertising_alert", {
+                    "category": "Advertising",
+                    "score": ad_score,
+                })
+                fired.append("web_advertising_alert")
+
+        # ── Social ───────────────────────────────────────────────────
+        social_score = cat_scores.get("Social", 0)
+        if social_score >= thresholds.get("Social", 50):
+            if self._try_fire("web_social_alert"):
+                if social_score >= 75:
+                    self._send_desktop_alert(
+                        title="Social Tracker Alert",
+                        message=(
+                            "Social trackers are linking your identity "
+                            "across sites."
+                        ),
+                        severity="High Risk",
+                    )
+                else:
+                    log.info(
+                        "In-dashboard notification: Social trackers "
+                        "(score=%.0f)", social_score,
+                    )
+                self._log_response("web_social_alert", {
+                    "category": "Social",
+                    "score": social_score,
+                })
+                fired.append("web_social_alert")
+
+        # ── Telemetry ────────────────────────────────────────────────
+        telem_score = cat_scores.get("Telemetry", 0)
+        if telem_score >= thresholds.get("Telemetry", 55):
+            if self._try_fire("web_telemetry_alert"):
+                telem_domains = [
+                    h.domain for h in getattr(report, "tracker_hits", [])
+                    if getattr(h, "tracker_category", "") == "Telemetry"
+                ][:5]
+                self._send_desktop_alert(
+                    title="Telemetry Data Exfiltration",
+                    message=(
+                        f"System/app telemetry detected — data being "
+                        f"sent to: {', '.join(telem_domains) or 'unknown'}. "
+                        f"Score: {telem_score:.0f}/100."
+                    ),
+                    severity="High Risk" if telem_score >= 80 else "Elevated",
+                )
+                if telem_score >= 80:
+                    self._log_response("web_telemetry_high_severity", {
+                        "category": "Telemetry",
+                        "score": telem_score,
+                        "domains": telem_domains,
+                    })
+                self._log_response("web_telemetry_alert", {
+                    "category": "Telemetry",
+                    "score": telem_score,
+                })
+                fired.append("web_telemetry_alert")
+
+        # ── Fingerprint ──────────────────────────────────────────────
+        fp_score = cat_scores.get("Fingerprint", 0)
+        if fp_score >= thresholds.get("Fingerprint", 40):
+            if self._try_fire("web_fingerprint_alert"):
+                fp_signals = getattr(report, "fingerprint_signals", [])
+                confidence = max(
+                    (getattr(s, "confidence", 0) for s in fp_signals
+                     if getattr(s, "detected", False)),
+                    default=0,
+                )
+                self._send_desktop_alert(
+                    title="Browser Fingerprinting Detected",
+                    message=(
+                        f"Browser fingerprinting attempt detected "
+                        f"(confidence: {confidence:.0%}). "
+                        f"Score: {fp_score:.0f}/100."
+                    ),
+                    severity=(
+                        "Critical" if fp_score >= 90
+                        else "High Risk" if fp_score >= 70
+                        else "Elevated"
+                    ),
+                )
+                self._log_response("web_fingerprint_alert", {
+                    "category": "Fingerprint",
+                    "score": fp_score,
+                    "confidence": confidence,
+                })
+                fired.append("web_fingerprint_alert")
+
+        return fired
+
+    def _handle_web_multi_escalation(self, report=None) -> list[str]:
+        """Multi-category escalation: fire when 3+ categories exceed thresholds.
+
+        When multiple tracker categories are simultaneously active above
+        their individual alert thresholds, this is treated as a unified
+        escalation event (per M05 spec).
+        """
+        fired: list[str] = []
+        if report is None:
+            return fired
+
+        cat_scores = getattr(report, "category_scores", {})
+        thresholds = getattr(config, "TRACKER_ALERT_THRESHOLDS", {})
+        escalation_count = getattr(
+            config, "TRACKER_MULTI_CATEGORY_ESCALATION_COUNT", 3,
+        )
+
+        categories_above = [
+            cat for cat, score in cat_scores.items()
+            if score >= thresholds.get(cat, 50)
+        ]
+
+        if len(categories_above) >= escalation_count:
+            if self._try_fire("web_multi_escalation"):
+                self._send_desktop_alert(
+                    title="⚠ Multi-Category Tracking Escalation",
+                    message=(
+                        f"{len(categories_above)} tracker categories active "
+                        f"above threshold: {', '.join(categories_above)}. "
+                        f"This indicates broad privacy exposure."
+                    ),
+                    severity="Critical",
+                )
+                self._log_response("web_multi_escalation", {
+                    "categories_above": categories_above,
+                    "count": len(categories_above),
+                })
+                fired.append("web_multi_escalation")
+
+        self._update_above_state(
+            "web_multi_escalation",
+            len(categories_above) >= escalation_count,
+        )
 
         return fired
 

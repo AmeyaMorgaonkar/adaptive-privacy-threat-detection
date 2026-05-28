@@ -2,7 +2,6 @@
 
 import threading
 import time
-from datetime import datetime, timezone
 from logger import get_logger
 from ui.data_bridge import DataBridge
 
@@ -20,23 +19,25 @@ def _show_startup_error(message: str) -> None:
 
 
 def monitor_loop(data_bridge: DataBridge):
-    """Background thread: runs real WiFi analysis + stub modules on a loop,
-    feeds ThreatScorer output into the DataBridge for the UI to consume.
+    """Background thread: runs real WiFi analysis + behavioral profiling
+    + web tracker on a loop, feeds ThreatScorer output into the DataBridge
+    for the UI.
 
-    WiFi analysis runs every DASHBOARD_REFRESH_MS (default 1s).
-    BehavioralReport and WebReport use stubs with raw_score=0 until
-    those modules are implemented in Milestones 04/05.
+    WiFi analysis, behavioral profiling, and web tracking run every
+    MONITOR_INTERVAL_SECONDS.
     """
     import config
     from modules.wifi_analysis import WiFiAnalyzer
-    from modules.threat_scoring import (
-        ThreatScorer, BehavioralReport, WebReport,
-    )
+    from modules.behavioral_profiling import BehavioralProfiler
+    from modules.web_tracker import WebTrackerMonitor
+    from modules.threat_scoring import ThreatScorer
     from modules.auto_responder import AutoResponder
 
     analyzer = WiFiAnalyzer()
     scorer = ThreatScorer()
     responder = AutoResponder()
+    profiler = BehavioralProfiler()
+    web_monitor = WebTrackerMonitor()
 
     interval = getattr(config, "MONITOR_INTERVAL_SECONDS",
                        config.SCAN_INTERVAL_SECONDS)
@@ -45,25 +46,19 @@ def monitor_loop(data_bridge: DataBridge):
 
     while True:
         try:
+            # Skip scanning if session is paused
+            if not data_bridge.is_session_running():
+                time.sleep(1)
+                continue
+
             # ── WiFi (real) ──
             wifi_report = analyzer.run_analysis()
 
-            # ── Behavioral (stub — scores 0 until M04) ──
-            behavioral_report = BehavioralReport(
-                timestamp=datetime.now(timezone.utc).isoformat(),
-                anomalous_processes=[],
-                raw_score=0.0,
-                severity="LOW",
-            )
+            # ── Behavioral (real — Milestone 04) ──
+            behavioral_report = profiler.run()
 
-            # ── Web Tracker (stub — scores 0 until M05) ──
-            web_report = WebReport(
-                timestamp=datetime.now(timezone.utc).isoformat(),
-                trackers_detected=[],
-                tracker_categories=[],
-                raw_score=0.0,
-                severity="LOW",
-            )
+            # ── Web Tracker (real — Milestone 05) ──
+            web_report = web_monitor.run()
 
             # ── Score ──
             score = scorer.compute(

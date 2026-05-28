@@ -19,6 +19,7 @@ from ui.pages import (
     DashboardPage, WiFiSecurityPage, BehaviourAnalysisPage,
     WebTrackingPage, AllActionsPage, NetworkLogsPage, SettingsPage,
 )
+from ui.report_panel import ReportPanel
 from utils.config_manager import ConfigManager
 import config
 
@@ -108,7 +109,8 @@ class Sidebar(QFrame):
         # ── Top Nav ──
         for name, icon in [("Dashboard", "⊞"), ("WiFi Security", "◉"),
                            ("Behaviour Analysis", "◎"),
-                           ("Web Tracking", "◈"), ("All Actions", "⚡")]:
+                           ("Web Tracking", "◈"), ("All Actions", "⚡"),
+                           ("Reports", "📊")]:
             btn = NavButton(name, icon)
             btn.clicked.connect(lambda _, n=name: self.app_window.show_page(n))
             layout.addWidget(btn)
@@ -265,9 +267,12 @@ class App(QMainWindow):
         self.pages["WiFi Security"] = WiFiSecurityPage(
             self.page_stack, data_bridge=self.data_bridge)
         self.pages["Behaviour Analysis"] = BehaviourAnalysisPage(
-            self.page_stack)
-        self.pages["Web Tracking"] = WebTrackingPage(self.page_stack)
+            self.page_stack, data_bridge=self.data_bridge)
+        self.pages["Web Tracking"] = WebTrackingPage(self.page_stack,
+                                                      data_bridge=self.data_bridge)
         self.pages["All Actions"] = AllActionsPage(self.page_stack)
+        self.pages["Reports"] = ReportPanel(self.page_stack,
+                                            data_bridge=self.data_bridge)
         self.pages["Network Logs"] = NetworkLogsPage(self.page_stack)
         self.pages["Settings"] = SettingsPage(
             self.page_stack,
@@ -303,15 +308,29 @@ class App(QMainWindow):
     def _on_refresh(self):
         """Polls DataBridge every tick, updates live pages."""
         score = self.data_bridge.latest()
-        if not score:
-            return
-        if "Dashboard" in self.pages:
+        if score and "Dashboard" in self.pages:
             self.pages["Dashboard"].refresh(score)
         # WiFi page gets full WiFiReport
         reports = self.data_bridge.get_reports()
         wifi_report = reports.get("wifi_report")
-        if wifi_report and "WiFi Security" in self.pages:
+        if wifi_report is not None and "WiFi Security" in self.pages:
             self.pages["WiFi Security"].refresh(score, wifi_report)
+        # Behaviour page gets full BehavioralReport
+        behavioral_report = reports.get("behavioral_report")
+        if behavioral_report is not None and "Behaviour Analysis" in self.pages:
+            self.pages["Behaviour Analysis"].refresh(score, behavioral_report)
+        # Web Tracking page gets full WebReport
+        web_report = reports.get("web_report")
+        if web_report is not None and "Web Tracking" in self.pages:
+            self.pages["Web Tracking"].refresh(score, web_report)
+        # Reports page gets all module reports
+        if "Reports" in self.pages:
+            self.pages["Reports"].refresh(
+                score,
+                wifi_report=wifi_report,
+                behavioral_report=behavioral_report,
+                web_report=web_report,
+            )
 
     def apply_full_theme(self):
         """Rebuild entire stylesheet and refresh all UI components.

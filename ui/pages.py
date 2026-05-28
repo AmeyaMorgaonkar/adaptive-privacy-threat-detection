@@ -3,6 +3,7 @@ All page views for the Sentinel dashboard (PySide6).
 Each page matches the design mockups and is wired for live data.
 """
 
+from datetime import datetime
 import config
 
 from PySide6.QtWidgets import (
@@ -382,6 +383,11 @@ class WiFiSecurityPage(QWidget):
             return
         t = _t()
 
+        def _rget(key, default=None):
+            if isinstance(wifi_report, dict):
+                return wifi_report.get(key, default)
+            return getattr(wifi_report, key, default)
+
         # ── Tier pill ──
         wifi_score = score.wifi_score if score else 0
         tier_text = score.tier if score else "Safe"
@@ -393,9 +399,9 @@ class WiFiSecurityPage(QWidget):
             " border-radius: 14px; padding: 6px 16px;")
 
         # ── Connected network ──
-        ssid = getattr(wifi_report, "connected_ssid", "Unknown")
-        enc = getattr(wifi_report, "encryption", "UNKNOWN")
-        signal = getattr(wifi_report, "signal_dbm", -100)
+        ssid = _rget("connected_ssid", "Unknown")
+        enc = _rget("encryption", "UNKNOWN")
+        signal = _rget("signal_dbm", -100)
         self._ssid_lbl.setText(ssid if ssid else "No Connection")
         self._enc_lbl.setText(f"{enc} Protocol")
         if enc in ("WPA3", "WPA2"):
@@ -420,7 +426,7 @@ class WiFiSecurityPage(QWidget):
                        else t["warning"] if wifi_score < 70
                        else t["danger"])
         self._gauge.set_score(wifi_score, gauge_color)
-        sev = getattr(wifi_report, "severity", "LOW")
+        sev = _rget("severity", "LOW")
         status_map = {"LOW": "OPTIMAL", "MEDIUM": "CAUTION",
                       "HIGH": "WARNING", "CRITICAL": "CRITICAL"}
         color_map = {"LOW": t["accent"], "MEDIUM": t["warning"],
@@ -430,7 +436,7 @@ class WiFiSecurityPage(QWidget):
             f"color: {color_map.get(sev, t['accent'])};")
 
         # ── Anomalies ──
-        threats = getattr(wifi_report, "threats_detected", [])
+        threats = _rget("threats_detected", [])
         n = len(threats)
         if n == 0:
             self._anomaly_card.update_value("0", t["accent"])
@@ -441,7 +447,7 @@ class WiFiSecurityPage(QWidget):
                 f"{n} issue{'s' if n != 1 else ''} found", t["danger"])
 
         # ── Nearby networks ──
-        networks = getattr(wifi_report, "nearby_networks", [])
+        networks = _rget("nearby_networks", [])
         for w in self._net_rows:
             self._net_layout.removeWidget(w)
             w.deleteLater()
@@ -491,8 +497,9 @@ class WiFiSecurityPage(QWidget):
 # ═══════════════════════════════════════════════════════════════════════
 
 class BehaviourAnalysisPage(QWidget):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, data_bridge=None):
         super().__init__(parent)
+        self.data_bridge = data_bridge
         t = _t()
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -513,11 +520,11 @@ class BehaviourAnalysisPage(QWidget):
         t_left.addWidget(sub)
         trl.addLayout(t_left)
         trl.addStretch()
-        pill = QLabel("● 61 — Moderate Threat")
-        pill.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-        pill.setStyleSheet("background-color: #FEF3C7; color: #92400E;"
-                           " border-radius: 14px; padding: 6px 16px;")
-        trl.addWidget(pill)
+        self._tier_pill = QLabel("● -- — Scanning…")
+        self._tier_pill.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        self._tier_pill.setStyleSheet("background-color: #F3F4F6; color: #374151;"
+                                     " border-radius: 14px; padding: 6px 16px;")
+        trl.addWidget(self._tier_pill)
         lay.addWidget(tr)
 
         # ── Stats row ──
@@ -525,9 +532,14 @@ class BehaviourAnalysisPage(QWidget):
         r1g = QGridLayout(r1)
         r1g.setContentsMargins(0, 0, 0, 15)
         r1g.setSpacing(12)
-        r1g.addWidget(StatCard(r1, "Behaviour Score", "61", "",
-                               value_color=t["warning"]), 0, 0)
 
+        # Behaviour Score card
+        self._score_card = StatCard(r1, "Behaviour Score", "--",
+                                    "Waiting for data…",
+                                    value_color=t["text_muted"], top_icon="🎯")
+        r1g.addWidget(self._score_card, 0, 0)
+
+        # Suspicious processes card
         sp = GlassFrame(r1)
         sp_lay = QVBoxLayout(sp)
         sp_lay.setContentsMargins(22, 22, 22, 22)
@@ -540,41 +552,98 @@ class BehaviourAnalysisPage(QWidget):
         spt.addStretch()
         spt.addWidget(QLabel("⚠️"))
         sp_lay.addLayout(spt)
-        spv = QLabel("4 flagged")
-        spv.setFont(QFont("Segoe UI", 32, QFont.Weight.Bold))
-        spv.setStyleSheet(f"color: {t['warning']};")
-        sp_lay.addWidget(spv)
-        spl = ClickableLabel("VIEW FLAGGED LIST →", t["accent"])
-        sp_lay.addWidget(spl)
+        self._susp_count_lbl = QLabel("-- flagged")
+        self._susp_count_lbl.setFont(QFont("Segoe UI", 32, QFont.Weight.Bold))
+        self._susp_count_lbl.setStyleSheet(f"color: {t['text_muted']};")
+        sp_lay.addWidget(self._susp_count_lbl)
+        self._susp_link = ClickableLabel("VIEW FLAGGED LIST →", t["accent"])
+        sp_lay.addWidget(self._susp_link)
         r1g.addWidget(sp, 0, 1)
 
-        aa = GlassFrame(r1)
-        aa_lay = QVBoxLayout(aa)
-        aa_lay.setContentsMargins(22, 22, 22, 22)
-        aa_lay.setSpacing(4)
-        aat = QHBoxLayout()
-        aatl = QLabel("AUTO-ACTIONS TAKEN")
-        aatl.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-        aatl.setStyleSheet(f"color: {t['text_muted']};")
-        aat.addWidget(aatl)
-        aat.addStretch()
-        aat.addWidget(PillLabel("ACTIVE", "ACTIVE"))
-        aa_lay.addLayout(aat)
-        aav = QLabel("7 today")
-        aav.setFont(QFont("Segoe UI", 32, QFont.Weight.Bold))
-        aav.setStyleSheet(f"color: {t['text_primary']};")
-        aa_lay.addWidget(aav)
-        aas = QLabel("Last action: Blocked svchost spoofing 12m ago")
-        aas.setFont(QFont("Segoe UI", 10))
-        aas.setStyleSheet(f"color: {t['text_secondary']};")
-        aas.setWordWrap(True)
-        aa_lay.addWidget(aas)
-        r1g.addWidget(aa, 0, 2)
+        # Anomalies detected card
+        self._anomaly_card = StatCard(r1, "Anomalies Detected", "--",
+                                      "Waiting for data…",
+                                      value_color=t["text_muted"], top_icon="⚡")
+        r1g.addWidget(self._anomaly_card, 0, 2)
         for c in range(3):
             r1g.setColumnStretch(c, 1)
         lay.addWidget(r1)
 
-        # ── Timeline + Flagged ──
+        # ── System resources row ──
+        r1b = QWidget()
+        r1bg = QGridLayout(r1b)
+        r1bg.setContentsMargins(0, 0, 0, 15)
+        r1bg.setSpacing(12)
+
+        # CPU gauge card
+        cpu_card = GlassFrame(r1b)
+        cpu_lay = QVBoxLayout(cpu_card)
+        cpu_lay.setContentsMargins(22, 22, 22, 22)
+        cpu_lay.setSpacing(4)
+        cpu_t = QLabel("CPU USAGE")
+        cpu_t.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        cpu_t.setStyleSheet(f"color: {t['text_muted']};")
+        cpu_lay.addWidget(cpu_t)
+        self._cpu_gauge = CircularGauge(cpu_card, size=120, score=0,
+                                        color=t["accent"])
+        cpu_lay.addWidget(self._cpu_gauge,
+                          alignment=Qt.AlignmentFlag.AlignCenter)
+        self._cpu_status = QLabel("--")
+        self._cpu_status.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self._cpu_status.setStyleSheet(f"color: {t['text_muted']};")
+        self._cpu_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        cpu_lay.addWidget(self._cpu_status)
+        r1bg.addWidget(cpu_card, 0, 0)
+
+        # Memory gauge card
+        mem_card = GlassFrame(r1b)
+        mem_lay = QVBoxLayout(mem_card)
+        mem_lay.setContentsMargins(22, 22, 22, 22)
+        mem_lay.setSpacing(4)
+        mem_t = QLabel("MEMORY USAGE")
+        mem_t.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        mem_t.setStyleSheet(f"color: {t['text_muted']};")
+        mem_lay.addWidget(mem_t)
+        self._mem_gauge = CircularGauge(mem_card, size=120, score=0,
+                                        color=t["accent"])
+        mem_lay.addWidget(self._mem_gauge,
+                          alignment=Qt.AlignmentFlag.AlignCenter)
+        self._mem_status = QLabel("--")
+        self._mem_status.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self._mem_status.setStyleSheet(f"color: {t['text_muted']};")
+        self._mem_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mem_lay.addWidget(self._mem_status)
+        r1bg.addWidget(mem_card, 0, 1)
+
+        # Baseline status card
+        bl_card = GlassFrame(r1b)
+        bl_lay = QVBoxLayout(bl_card)
+        bl_lay.setContentsMargins(22, 22, 22, 22)
+        bl_lay.setSpacing(4)
+        blt = QHBoxLayout()
+        bltl = QLabel("BASELINE STATUS")
+        bltl.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        bltl.setStyleSheet(f"color: {t['text_muted']};")
+        blt.addWidget(bltl)
+        blt.addStretch()
+        self._baseline_pill = PillLabel("LEARNING", "WARNING")
+        blt.addWidget(self._baseline_pill)
+        bl_lay.addLayout(blt)
+        self._baseline_status = QLabel("Collecting data…")
+        self._baseline_status.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        self._baseline_status.setStyleSheet(f"color: {t['text_primary']};")
+        bl_lay.addWidget(self._baseline_status)
+        self._baseline_detail = QLabel("Baseline will be established after the learning period")
+        self._baseline_detail.setFont(QFont("Segoe UI", 10))
+        self._baseline_detail.setStyleSheet(f"color: {t['text_secondary']};")
+        self._baseline_detail.setWordWrap(True)
+        bl_lay.addWidget(self._baseline_detail)
+        r1bg.addWidget(bl_card, 0, 2)
+        for c in range(3):
+            r1bg.setColumnStretch(c, 1)
+        lay.addWidget(r1b)
+
+        # ── Flagged processes table + Anomalies list ──
         r2 = QWidget()
         r2g = QGridLayout(r2)
         r2g.setContentsMargins(0, 0, 0, 15)
@@ -582,33 +651,7 @@ class BehaviourAnalysisPage(QWidget):
         r2g.setColumnStretch(0, 3)
         r2g.setColumnStretch(1, 2)
 
-        graph = GlassFrame(r2)
-        g_lay = QVBoxLayout(graph)
-        g_lay.setContentsMargins(0, 0, 0, 0)
-        g_lay.setSpacing(0)
-        gh = QWidget(graph)
-        ghl = QHBoxLayout(gh)
-        ghl.setContentsMargins(22, 22, 22, 10)
-        gt = QLabel("Process Activity Timeline")
-        gt.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
-        gt.setStyleSheet(f"color: {t['text_primary']};")
-        ghl.addWidget(gt)
-        ghl.addStretch()
-        leg1 = QLabel("● Normal  ")
-        leg1.setFont(QFont("Segoe UI", 9))
-        leg1.setStyleSheet(f"color: {t['text_muted']};")
-        ghl.addWidget(leg1)
-        leg2 = QLabel("● Suspicious")
-        leg2.setFont(QFont("Segoe UI", 9))
-        leg2.setStyleSheet(f"color: {t['warning']};")
-        ghl.addWidget(leg2)
-        g_lay.addWidget(gh)
-        timeline = TimelineCanvas(graph)
-        timeline.setFixedHeight(180)
-        g_lay.addWidget(timeline)
-        g_lay.addWidget(_vspacer(10))
-        r2g.addWidget(graph, 0, 0)
-
+        # Flagged Processes table (dynamic)
         fp = GlassFrame(r2)
         fp_lay = QVBoxLayout(fp)
         fp_lay.setContentsMargins(0, 0, 0, 0)
@@ -626,18 +669,37 @@ class BehaviourAnalysisPage(QWidget):
         fprl.setStyleSheet(f"color: {t['text_muted']};")
         fphl.addWidget(fprl)
         fp_lay.addWidget(fph)
-        fp_lay.addWidget(table_header(fp, [(150, "Process Name"), (70, "CPU%"),
-                                           (80, "Risk")]))
-        for name, cpu, risk in [
-            ("crypt_x64.exe", "84%", "HIGH"),
-            ("unknown_v3.bin", "12%", "MED"),
-            ("svchost_tnt.exe", "41%", "HIGH"),
-            ("ps_update.sh", "0.4%", "LOW"),
-        ]:
-            fp_lay.addWidget(table_row(fp, [(150, name, "mono"), (70, cpu),
-                                            (80, risk, "pill")]))
-        fp_lay.addWidget(_vspacer(10))
-        r2g.addWidget(fp, 0, 1)
+        self._fp_header = table_header(fp, [(180, "Process Name"), (80, "CPU%"),
+                                            (80, "Memory"), (80, "Risk")])
+        fp_lay.addWidget(self._fp_header)
+        self._fp_container = fp_lay
+        self._fp_rows: list[QWidget] = []
+        placeholder = QLabel("    Waiting for first scan…")
+        placeholder.setFont(QFont("Segoe UI", 11))
+        placeholder.setStyleSheet(f"color: {t['text_muted']};")
+        placeholder.setContentsMargins(22, 15, 22, 15)
+        self._fp_rows.append(placeholder)
+        fp_lay.addWidget(placeholder)
+        self._fp_spacer = _vspacer(10)
+        fp_lay.addWidget(self._fp_spacer)
+        r2g.addWidget(fp, 0, 0)
+
+        # Anomaly details list (dynamic)
+        anom_frame = GlassFrame(r2)
+        anom_lay = QVBoxLayout(anom_frame)
+        anom_lay.setContentsMargins(0, 0, 0, 0)
+        anom_lay.setSpacing(0)
+        anom_lay.addWidget(section_header(anom_frame, "Detected Anomalies"))
+        self._anom_container = QVBoxLayout()
+        self._anom_container.setContentsMargins(22, 0, 22, 15)
+        self._anom_container.setSpacing(4)
+        no_anom = QLabel("✅  No anomalies detected yet.")
+        no_anom.setFont(QFont("Segoe UI", 11))
+        no_anom.setStyleSheet(f"color: {t['accent']};")
+        self._anom_container.addWidget(no_anom)
+        self._anom_widgets: list[QWidget] = [no_anom]
+        anom_lay.addLayout(self._anom_container)
+        r2g.addWidget(anom_frame, 0, 1)
         lay.addWidget(r2)
 
         # ── Rules + Alerts ──
@@ -656,34 +718,274 @@ class BehaviourAnalysisPage(QWidget):
                                        t["accent"]))
         for title_, sub_, on in [
             ("Alert on high CPU spike",
-             "Trigger alert if single process exceeds 80%", True),
-            ("Block keylogger patterns",
-             "Heuristic monitoring of keystroke listeners", True),
-            ("Monitor startup items",
-             "Alert on new entries in boot registry", False),
+             f"Trigger alert if single process exceeds {config.HIGH_CPU_PROCESS_THRESHOLD:.0f}%", True),
+            ("Flag unknown processes",
+             "Alert when processes not in the safe list are detected", True),
+            ("Process churn detection",
+             f"Alert on > {config.PROCESS_CHURN_THRESHOLD} new processes per interval", True),
         ]:
             r_lay.addWidget(_toggle_row(rules, title_, sub_, on))
         r_lay.addWidget(_vspacer(15))
         r3g.addWidget(rules, 0, 0)
 
-        alerts = GlassFrame(r3)
-        a_lay = QVBoxLayout(alerts)
-        a_lay.setContentsMargins(0, 0, 0, 0)
-        a_lay.setSpacing(0)
-        a_lay.addWidget(section_header(alerts, "Recent Behaviour Alerts"))
-        for time_, desc, sev in [
-            ("14:02:11", "Unauthorized memory access blocked in kernel_bridge",
-             "CRITICAL"),
-            ("13:45:00", "High disk I/O detected: search_agent scanning",
-             "WARNING"),
-            ("11:12:32", "Behavioral heuristics engine v2.1.4 deployed",
-             "INFO"),
-        ]:
-            a_lay.addWidget(_alert_row(alerts, time_, desc, sev))
-        a_lay.addWidget(_vspacer(10))
-        r3g.addWidget(alerts, 0, 1)
+        # Recent alerts (dynamic)
+        alerts_frame = GlassFrame(r3)
+        alerts_lay = QVBoxLayout(alerts_frame)
+        alerts_lay.setContentsMargins(0, 0, 0, 0)
+        alerts_lay.setSpacing(0)
+        alerts_lay.addWidget(section_header(alerts_frame,
+                                            "Recent Behaviour Alerts"))
+        self._alerts_container = QVBoxLayout()
+        self._alerts_container.setContentsMargins(0, 0, 0, 0)
+        self._alerts_container.setSpacing(0)
+        no_alert = _alert_row(alerts_frame, "--:--:--",
+                              "Waiting for data…", "INFO")
+        self._alerts_container.addWidget(no_alert)
+        self._alert_widgets: list[QWidget] = [no_alert]
+        alerts_lay.addLayout(self._alerts_container)
+        alerts_lay.addWidget(_vspacer(10))
+        r3g.addWidget(alerts_frame, 0, 1)
         lay.addWidget(r3)
         lay.addStretch()
+
+    # ── Live data refresh ──────────────────────────────────────────
+
+    def refresh(self, score, behavioral_report):
+        """Update all Behaviour Analysis widgets with live BehavioralReport data."""
+        if behavioral_report is None:
+            return
+        t = _t()
+
+        def _rget(key, default=None):
+            if isinstance(behavioral_report, dict):
+                return behavioral_report.get(key, default)
+            return getattr(behavioral_report, key, default)
+
+        bscore = _rget("behavioral_score", 0.0)
+        severity = _rget("severity", "LOW")
+        anomalies = _rget("anomalies", [])
+        anomalous_procs = _rget("anomalous_processes", [])
+        snapshot = _rget("snapshot", None)
+        raw = _rget("raw_score", 0.0)
+        deviation = _rget("baseline_deviation", 0.0)
+
+        # ── Tier pill ──
+        tier_text = score.tier if score else "Safe"
+        tier_info = TIER_COLORS.get(tier_text, TIER_COLORS["Safe"])
+        sev_labels = {"LOW": "Safe", "MEDIUM": "Moderate Threat",
+                      "HIGH": "High Threat"}
+        self._tier_pill.setText(
+            f"● {int(bscore)} — {sev_labels.get(severity, severity)}")
+        if severity == "HIGH":
+            self._tier_pill.setStyleSheet(
+                "background-color: #FEE2E2; color: #991B1B;"
+                " border-radius: 14px; padding: 6px 16px;")
+        elif severity == "MEDIUM":
+            self._tier_pill.setStyleSheet(
+                "background-color: #FEF3C7; color: #92400E;"
+                " border-radius: 14px; padding: 6px 16px;")
+        else:
+            self._tier_pill.setStyleSheet(
+                "background-color: #D1FAE5; color: #065F46;"
+                " border-radius: 14px; padding: 6px 16px;")
+
+        # ── Score card ──
+        def score_color(v):
+            if v < 25: return t["accent"]
+            elif v < 50: return t["warning"]
+            else: return t["danger"]
+
+        self._score_card.update_value(int(bscore), score_color(bscore))
+        sev_sub = {"LOW": "System is behaving normally",
+                   "MEDIUM": "Some anomalies detected",
+                   "HIGH": "Significant deviations detected"}
+        self._score_card.update_subtext(
+            sev_sub.get(severity, ""), score_color(bscore))
+
+        # ── Suspicious processes count ──
+        n_susp = len(anomalous_procs)
+        if n_susp == 0:
+            self._susp_count_lbl.setText("0 flagged")
+            self._susp_count_lbl.setStyleSheet(f"color: {t['accent']};")
+        else:
+            self._susp_count_lbl.setText(f"{n_susp} flagged")
+            self._susp_count_lbl.setStyleSheet(f"color: {t['warning']};")
+
+        # ── Anomalies card ──
+        n_anom = len(anomalies)
+        if n_anom == 0:
+            self._anomaly_card.update_value("0", t["accent"])
+            self._anomaly_card.update_subtext("No anomalies detected", t["accent"])
+        else:
+            self._anomaly_card.update_value(str(n_anom), t["danger"])
+            self._anomaly_card.update_subtext(
+                f"{n_anom} anomal{'ies' if n_anom != 1 else 'y'} detected",
+                t["danger"])
+
+        # ── CPU / Memory gauges ──
+        if snapshot is not None:
+            cpu = getattr(snapshot, "cpu_percent", 0.0) if not isinstance(snapshot, dict) else snapshot.get("cpu_percent", 0.0)
+            mem = getattr(snapshot, "memory_percent", 0.0) if not isinstance(snapshot, dict) else snapshot.get("memory_percent", 0.0)
+            mem_mb = getattr(snapshot, "memory_used_mb", 0.0) if not isinstance(snapshot, dict) else snapshot.get("memory_used_mb", 0.0)
+
+            cpu_color = t["accent"] if cpu < 50 else t["warning"] if cpu < 80 else t["danger"]
+            self._cpu_gauge.set_score(cpu, cpu_color)
+            self._cpu_status.setText(f"{cpu:.1f}%")
+            self._cpu_status.setStyleSheet(f"color: {cpu_color};")
+
+            mem_color = t["accent"] if mem < 60 else t["warning"] if mem < 85 else t["danger"]
+            self._mem_gauge.set_score(mem, mem_color)
+            self._mem_status.setText(f"{mem:.1f}% ({mem_mb:.0f} MB)")
+            self._mem_status.setStyleSheet(f"color: {mem_color};")
+
+        # ── Baseline status ──
+        # Try to detect learning state from the profiler via data_bridge
+        is_learning = deviation == 0.0 and bscore == 0.0 and n_anom == 0
+        if is_learning:
+            self._baseline_pill.setText("LEARNING")
+            self._baseline_pill.setStyleSheet(
+                "QLabel { background-color: #FEF3C7; color: #92400E;"
+                " border-radius: 6px; padding: 3px 10px; }")
+            self._baseline_status.setText("Building baseline…")
+            self._baseline_detail.setText(
+                f"Collecting system snapshots to establish normal behaviour")
+        else:
+            self._baseline_pill.setText("ACTIVE")
+            self._baseline_pill.setStyleSheet(
+                "QLabel { background-color: #D1FAE5; color: #065F46;"
+                " border-radius: 6px; padding: 3px 10px; }")
+            self._baseline_status.setText("Baseline active")
+            self._baseline_detail.setText(
+                f"Deviation: {deviation:.1f}% from baseline")
+
+        # ── Flagged processes table ──
+        for w in self._fp_rows:
+            self._fp_container.removeWidget(w)
+            w.deleteLater()
+        self._fp_rows.clear()
+
+        insert_idx = self._fp_container.indexOf(self._fp_spacer)
+        if snapshot is not None:
+            processes = getattr(snapshot, "top_cpu_processes", []) if not isinstance(snapshot, dict) else snapshot.get("top_cpu_processes", [])
+            # Show top processes, highlighting suspicious ones
+            shown = 0
+            for p in processes:
+                if shown >= 8:
+                    break
+                if isinstance(p, dict):
+                    pname = p.get("name", "unknown")
+                    pcpu = p.get("cpu_percent", 0.0)
+                    pmem = p.get("memory_mb", 0.0)
+                    psusp = p.get("is_suspicious", False)
+                else:
+                    pname = getattr(p, "name", "unknown")
+                    pcpu = getattr(p, "cpu_percent", 0.0)
+                    pmem = getattr(p, "memory_mb", 0.0)
+                    psusp = getattr(p, "is_suspicious", False)
+
+                is_flagged = pname in anomalous_procs or psusp
+                risk = "HIGH" if pcpu > config.HIGH_CPU_PROCESS_THRESHOLD else (
+                    "MED" if is_flagged else "LOW")
+
+                row = table_row(self, [
+                    (180, pname, "mono"),
+                    (80, f"{pcpu:.1f}%"),
+                    (80, f"{pmem:.0f} MB", "light"),
+                    (80, risk, "pill"),
+                ])
+                self._fp_rows.append(row)
+                self._fp_container.insertWidget(insert_idx, row)
+                insert_idx += 1
+                shown += 1
+
+        if not self._fp_rows:
+            placeholder = QLabel("    No processes to display")
+            placeholder.setFont(QFont("Segoe UI", 11))
+            placeholder.setStyleSheet(f"color: {t['text_muted']};")
+            placeholder.setContentsMargins(22, 15, 22, 15)
+            self._fp_rows.append(placeholder)
+            self._fp_container.insertWidget(insert_idx, placeholder)
+
+        # ── Anomaly details list ──
+        for w in self._anom_widgets:
+            self._anom_container.removeWidget(w)
+            w.deleteLater()
+        self._anom_widgets.clear()
+
+        if anomalies:
+            for anom in anomalies:
+                if isinstance(anom, dict):
+                    atype = anom.get("type", "UNKNOWN")
+                    adesc = anom.get("description", "")
+                    asev = anom.get("severity", "LOW")
+                    acontrib = anom.get("score_contribution", 0)
+                else:
+                    atype = getattr(anom, "type", "UNKNOWN")
+                    adesc = getattr(anom, "description", "")
+                    asev = getattr(anom, "severity", "LOW")
+                    acontrib = getattr(anom, "score_contribution", 0)
+
+                sev_icon = {"LOW": "ℹ️", "MEDIUM": "⚠️", "HIGH": "🔴"}
+                icon = sev_icon.get(asev, "⚠️")
+                sev_color = {"LOW": t["text_secondary"], "MEDIUM": t["warning"],
+                             "HIGH": t["danger"]}
+                color = sev_color.get(asev, t["warning"])
+
+                anom_w = QWidget()
+                anom_l = QVBoxLayout(anom_w)
+                anom_l.setContentsMargins(0, 6, 0, 6)
+                anom_l.setSpacing(2)
+                top_row = QHBoxLayout()
+                type_lbl = QLabel(f"{icon}  {atype}")
+                type_lbl.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+                type_lbl.setStyleSheet(f"color: {color};")
+                top_row.addWidget(type_lbl)
+                top_row.addStretch()
+                score_lbl = QLabel(f"+{acontrib:.0f}")
+                score_lbl.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+                score_lbl.setStyleSheet(f"color: {color};")
+                top_row.addWidget(score_lbl)
+                anom_l.addLayout(top_row)
+                desc_lbl = QLabel(adesc)
+                desc_lbl.setFont(QFont("Segoe UI", 10))
+                desc_lbl.setStyleSheet(f"color: {t['text_secondary']};")
+                desc_lbl.setWordWrap(True)
+                anom_l.addWidget(desc_lbl)
+                self._anom_container.addWidget(anom_w)
+                self._anom_widgets.append(anom_w)
+        else:
+            ok = QLabel("✅  No anomalies detected. System is behaving normally.")
+            ok.setFont(QFont("Segoe UI", 11))
+            ok.setStyleSheet(f"color: {t['accent']};")
+            self._anom_container.addWidget(ok)
+            self._anom_widgets.append(ok)
+
+        # ── Recent alerts (from anomalies) ──
+        for w in self._alert_widgets:
+            self._alerts_container.removeWidget(w)
+            w.deleteLater()
+        self._alert_widgets.clear()
+
+        if anomalies:
+            now_str = datetime.now().strftime("%H:%M:%S")
+            for anom in anomalies[:5]:
+                if isinstance(anom, dict):
+                    adesc = anom.get("description", "")
+                    asev = anom.get("severity", "LOW")
+                else:
+                    adesc = getattr(anom, "description", "")
+                    asev = getattr(anom, "severity", "LOW")
+
+                sev_map = {"LOW": "INFO", "MEDIUM": "WARNING", "HIGH": "CRITICAL"}
+                row = _alert_row(self, now_str, adesc, sev_map.get(asev, "INFO"))
+                self._alerts_container.addWidget(row)
+                self._alert_widgets.append(row)
+        else:
+            now_str = datetime.now().strftime("%H:%M:%S")
+            ok_row = _alert_row(self, now_str,
+                                "No behavioural anomalies detected", "INFO")
+            self._alerts_container.addWidget(ok_row)
+            self._alert_widgets.append(ok_row)
 
 
 class TimelineCanvas(QWidget):
@@ -738,13 +1040,15 @@ class TimelineCanvas(QWidget):
 # ═══════════════════════════════════════════════════════════════════════
 
 class WebTrackingPage(QWidget):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, data_bridge=None):
         super().__init__(parent)
+        self.data_bridge = data_bridge
         t = _t()
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
 
+        # ── Title row ──
         tr = QWidget()
         trl = QHBoxLayout(tr)
         trl.setContentsMargins(0, 0, 0, 20)
@@ -759,32 +1063,35 @@ class WebTrackingPage(QWidget):
         t_left.addWidget(sub)
         trl.addLayout(t_left)
         trl.addStretch()
-        pill = QLabel("● 61 — Moderate")
-        pill.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-        pill.setStyleSheet("background-color: #FEF3C7; color: #92400E;"
-                           " border-radius: 14px; padding: 6px 16px;")
-        trl.addWidget(pill)
+        self._tier_pill = QLabel("● -- — Scanning…")
+        self._tier_pill.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        self._tier_pill.setStyleSheet("background-color: #F3F4F6; color: #374151;"
+                                     " border-radius: 14px; padding: 6px 16px;")
+        trl.addWidget(self._tier_pill)
         lay.addWidget(tr)
 
+        # ── Stats row ──
         r1 = QWidget()
         r1g = QGridLayout(r1)
         r1g.setContentsMargins(0, 0, 0, 15)
         r1g.setSpacing(12)
-        r1g.addWidget(StatCard(r1, "Trackers Blocked Today", "143",
-                               "↗ 12% from yesterday", top_icon="🛡️",
-                               subtext_color=t["accent"]), 0, 0)
-        r1g.addWidget(StatCard(r1, "Data Requests Intercepted", "28",
-                               "↗ 8 new anomalies", top_icon="⊕",
-                               subtext_color=t["warning"]), 0, 1)
-        r1g.addWidget(StatCard(r1, "Sites With High Tracking", "5",
-                               "▲ Requires immediate review",
-                               value_color=t["danger"], top_icon="❗"), 0, 2)
-        r1g.addWidget(StatCard(r1, "Web Threat Score", "61", "Moderate",
-                               value_color=t["warning"]), 0, 3)
+        self._trackers_card = StatCard(r1, "Trackers Detected", "--",
+                                       "Waiting for scan…", top_icon="🛡️")
+        self._categories_card = StatCard(r1, "Active Categories", "--",
+                                          "Waiting for scan…", top_icon="⊕")
+        self._fp_card = StatCard(r1, "Fingerprint Signals", "--",
+                                  "Waiting for scan…", top_icon="🔏")
+        self._score_card = StatCard(r1, "Web Threat Score", "--",
+                                     "Waiting for scan…", top_icon="🎯")
+        r1g.addWidget(self._trackers_card, 0, 0)
+        r1g.addWidget(self._categories_card, 0, 1)
+        r1g.addWidget(self._fp_card, 0, 2)
+        r1g.addWidget(self._score_card, 0, 3)
         for c in range(4):
             r1g.setColumnStretch(c, 1)
         lay.addWidget(r1)
 
+        # ── Row 2: Tracker domains table + Category breakdown ──
         r2 = QWidget()
         r2g = QGridLayout(r2)
         r2g.setContentsMargins(0, 0, 0, 15)
@@ -792,56 +1099,115 @@ class WebTrackingPage(QWidget):
         r2g.setColumnStretch(0, 3)
         r2g.setColumnStretch(1, 1)
 
-        dom = GlassFrame(r2)
-        dl = QVBoxLayout(dom)
+        # Tracker domains table (dynamic)
+        self._dom_card = GlassFrame(r2)
+        dl = QVBoxLayout(self._dom_card)
         dl.setContentsMargins(0, 0, 0, 0)
         dl.setSpacing(0)
-        dl.addWidget(section_header(dom, "Top Tracking Domains Blocked",
-                                    "View all logs →"))
-        dl.addWidget(table_header(dom, [(200, "Domain"), (120, "Category"),
-                                        (80, "Count"), (120, "Last Blocked")]))
-        for d, cat, cnt, when, style in [
-            ("doubleclick.net", "ADVERTISING", "1,244", "2m ago", "bold"),
-            ("google-analytics.com", "ANALYTICS", "892", "15m ago", "bold"),
-            ("canvas-fingerprint.io", "FINGERPRINT", "412", "42m ago", "normal"),
-            ("facebook.com/tr", "SOCIAL", "355", "1h ago", "normal"),
-            ("hotjar.io/tracker", "ANALYTICS", "298", "2h ago", "normal"),
-            ("amazon-adsystem.com", "ADVERTISING", "211", "3h ago", "normal"),
-            ("taboola.map", "ADVERTISING", "184", "5h ago", "normal"),
-            ("font-telemetry.net", "FINGERPRINT", "156", "6h ago", "normal"),
-        ]:
-            dl.addWidget(table_row(dom, [(200, d, style), (120, cat, "pill"),
-                                         (80, cnt), (120, when, "light")]))
-        dl.addWidget(_vspacer(10))
-        r2g.addWidget(dom, 0, 0)
+        dl.addWidget(section_header(self._dom_card, "Top Tracking Domains Detected",
+                                    "Live data"))
+        self._dom_header = table_header(self._dom_card,
+                                         [(200, "Domain"), (120, "Category"),
+                                          (80, "Score"), (120, "Severity")])
+        dl.addWidget(self._dom_header)
+        self._dom_rows: list[QWidget] = []
+        placeholder = QLabel("    Waiting for first scan…")
+        placeholder.setFont(QFont("Segoe UI", 11))
+        placeholder.setStyleSheet(f"color: {t['text_muted']};")
+        placeholder.setContentsMargins(22, 15, 22, 15)
+        self._dom_rows.append(placeholder)
+        dl.addWidget(placeholder)
+        self._dom_spacer = _vspacer(10)
+        dl.addWidget(self._dom_spacer)
+        r2g.addWidget(self._dom_card, 0, 0)
 
+        # Category breakdown donut + legend (dynamic)
         cat_card = GlassFrame(r2)
         cl = QVBoxLayout(cat_card)
         cl.setContentsMargins(0, 0, 0, 0)
         cl.setSpacing(0)
         cl.addWidget(section_header(cat_card, "Categories Breakdown"))
-        donut = DonutChart(cat_card)
-        donut.setFixedHeight(140)
-        cl.addWidget(donut)
-        for label, pct in [("◉ Ad Networks", "42%"), ("◉ Analytics", "31%"),
-                           ("◉ Fingerprinting", "15%"), ("◉ Social Media", "12%")]:
+        self._donut = DonutChart(cat_card)
+        self._donut.setFixedHeight(140)
+        cl.addWidget(self._donut)
+        # Category legend rows (dynamic)
+        self._cat_legend_container = QVBoxLayout()
+        self._cat_legend_container.setContentsMargins(0, 0, 0, 0)
+        self._cat_legend_container.setSpacing(0)
+        self._cat_legend_widgets: list[QWidget] = []
+        # Initial static placeholders
+        _cat_colors = {
+            "Advertising": "#3B82F6", "Analytics": "#10B981",
+            "Fingerprint": "#EF4444", "Social": "#8B5CF6",
+            "Telemetry": "#F59E0B",
+        }
+        for label_text in ["◉ Advertising", "◉ Analytics",
+                           "◉ Fingerprinting", "◉ Social", "◉ Telemetry"]:
             cfr = QWidget(cat_card)
             cfl = QHBoxLayout(cfr)
             cfl.setContentsMargins(22, 5, 22, 5)
-            clbl = QLabel(label)
+            clbl = QLabel(label_text)
             clbl.setFont(QFont("Segoe UI", 11))
             clbl.setStyleSheet(f"color: {t['text_primary']};")
             cfl.addWidget(clbl)
             cfl.addStretch()
-            cp = QLabel(pct)
+            cp = QLabel("--")
             cp.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-            cp.setStyleSheet(f"color: {t['text_primary']};")
+            cp.setStyleSheet(f"color: {t['text_muted']};")
             cfl.addWidget(cp)
-            cl.addWidget(cfr)
+            self._cat_legend_container.addWidget(cfr)
+            self._cat_legend_widgets.append(cfr)
+        cl.addLayout(self._cat_legend_container)
         cl.addWidget(_vspacer(15))
         r2g.addWidget(cat_card, 0, 1)
         lay.addWidget(r2)
 
+        # ── Row 3: Category Score Bars + Fingerprint Signals ──
+        r2b = QWidget()
+        r2bg = QGridLayout(r2b)
+        r2bg.setContentsMargins(0, 0, 0, 15)
+        r2bg.setSpacing(12)
+        r2bg.setColumnStretch(0, 1)
+        r2bg.setColumnStretch(1, 1)
+
+        # Category score bars
+        cat_bar_card = GlassFrame(r2b)
+        cat_bar_lay = QVBoxLayout(cat_bar_card)
+        cat_bar_lay.setContentsMargins(0, 0, 0, 0)
+        cat_bar_lay.setSpacing(0)
+        cat_bar_lay.addWidget(section_header(cat_bar_card, "Category Threat Scores"))
+        self._analytics_bar = ProgressRow(cat_bar_card, "Analytics", "0%", "#10B981", 0)
+        self._advertising_bar = ProgressRow(cat_bar_card, "Advertising", "0%", "#3B82F6", 0)
+        self._social_bar = ProgressRow(cat_bar_card, "Social", "0%", "#8B5CF6", 0)
+        self._telemetry_bar = ProgressRow(cat_bar_card, "Telemetry", "0%", "#F59E0B", 0)
+        self._fingerprint_bar = ProgressRow(cat_bar_card, "Fingerprint", "0%", "#EF4444", 0)
+        cat_bar_lay.addWidget(self._analytics_bar)
+        cat_bar_lay.addWidget(self._advertising_bar)
+        cat_bar_lay.addWidget(self._social_bar)
+        cat_bar_lay.addWidget(self._telemetry_bar)
+        cat_bar_lay.addWidget(self._fingerprint_bar)
+        cat_bar_lay.addWidget(_vspacer(15))
+        r2bg.addWidget(cat_bar_card, 0, 0)
+
+        # Fingerprint signals (dynamic)
+        fp_frame = GlassFrame(r2b)
+        fp_lay = QVBoxLayout(fp_frame)
+        fp_lay.setContentsMargins(0, 0, 0, 0)
+        fp_lay.setSpacing(0)
+        fp_lay.addWidget(section_header(fp_frame, "Fingerprinting Detection"))
+        self._fp_container = QVBoxLayout()
+        self._fp_container.setContentsMargins(22, 0, 22, 15)
+        self._fp_container.setSpacing(4)
+        no_fp = QLabel("✅  No fingerprinting attempts detected.")
+        no_fp.setFont(QFont("Segoe UI", 11))
+        no_fp.setStyleSheet(f"color: {t['accent']};")
+        self._fp_container.addWidget(no_fp)
+        self._fp_widgets: list[QWidget] = [no_fp]
+        fp_lay.addLayout(self._fp_container)
+        r2bg.addWidget(fp_frame, 0, 1)
+        lay.addWidget(r2b)
+
+        # ── Row 4: Top Offenders + Recommended Actions ──
         r3 = QWidget()
         r3g = QGridLayout(r3)
         r3g.setContentsMargins(0, 0, 0, 15)
@@ -849,54 +1215,340 @@ class WebTrackingPage(QWidget):
         r3g.setColumnStretch(0, 1)
         r3g.setColumnStretch(1, 1)
 
-        wl = GlassFrame(r3)
-        wl_lay = QVBoxLayout(wl)
-        wl_lay.setContentsMargins(0, 0, 0, 0)
-        wl_lay.setSpacing(0)
-        wlh = QWidget(wl)
-        wlhl = QHBoxLayout(wlh)
-        wlhl.setContentsMargins(22, 22, 22, 12)
-        wlt = QLabel("Whitelist / Exceptions")
-        wlt.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
-        wlt.setStyleSheet(f"color: {t['text_primary']};")
-        wlhl.addWidget(wlt)
-        wlhl.addStretch()
-        wlhl.addWidget(accent_button("+ Add Exception"))
-        wl_lay.addWidget(wlh)
-        wl_lay.addWidget(table_header(wl, [(180, "Site Domain"),
-                                            (180, "Reasoning"), (60, "Actions")]))
-        for site, reason in [
-            ("internal.company-wiki.com", "Required for team metrics"),
-            ("stripe.com/dashboard", "Payment processor verification"),
-            ("cloud.provider.com/logs", "Infrastructure monitoring"),
-        ]:
-            wl_lay.addWidget(table_row(wl, [(180, site, "bold"),
-                                             (180, reason), (60, "", "trash")]))
-        wl_lay.addWidget(_vspacer(15))
-        r3g.addWidget(wl, 0, 0)
+        # Top offenders list (dynamic)
+        offenders_frame = GlassFrame(r3)
+        off_lay = QVBoxLayout(offenders_frame)
+        off_lay.setContentsMargins(0, 0, 0, 0)
+        off_lay.setSpacing(0)
+        off_lay.addWidget(section_header(offenders_frame, "Top Offenders"))
+        self._offenders_container = QVBoxLayout()
+        self._offenders_container.setContentsMargins(22, 0, 22, 15)
+        self._offenders_container.setSpacing(4)
+        no_off = QLabel("✅  No tracker offenders detected yet.")
+        no_off.setFont(QFont("Segoe UI", 11))
+        no_off.setStyleSheet(f"color: {t['accent']};")
+        self._offenders_container.addWidget(no_off)
+        self._offender_widgets: list[QWidget] = [no_off]
+        off_lay.addLayout(self._offenders_container)
+        r3g.addWidget(offenders_frame, 0, 0)
 
+        # Recommended actions (dynamic)
         ra = GlassFrame(r3)
         ral = QVBoxLayout(ra)
         ral.setContentsMargins(0, 0, 0, 0)
         ral.setSpacing(0)
         ral.addWidget(section_header(ra, "Recommended Actions"))
-        ral.addWidget(ActionCard(ra, "🔏", "Stricter Fingerprinting",
-                                 'Enable "Canvas Noise" for high-risk domains.'))
-        ral.addWidget(ActionCard(ra, "🔗", "Social Media Trackers",
-                                 "Found 12 sites with non-essential social pixel tracking."))
-        ral.addWidget(ActionCard(ra, "⚠️", "Review High-Risk Sites",
-                                 "5 domains flagged for aggressive tracking."))
+        self._actions_container = QVBoxLayout()
+        self._actions_container.setContentsMargins(0, 0, 0, 0)
+        self._actions_container.setSpacing(0)
+        self._action_widgets: list[QWidget] = []
+        # Default static actions
+        a1 = ActionCard(ra, "🔏", "Enable Fingerprint Resistance",
+                        "Set privacy.resistFingerprinting=true in your browser.")
+        a2 = ActionCard(ra, "🔗", "Block Ad Trackers",
+                        "Enable DNS-level ad blocking (Pi-hole, NextDNS).")
+        a3 = ActionCard(ra, "🛡️", "Review Detected Trackers",
+                        "Check the tracker list and consider browser extensions.")
+        self._actions_container.addWidget(a1)
+        self._actions_container.addWidget(a2)
+        self._actions_container.addWidget(a3)
+        self._action_widgets.extend([a1, a2, a3])
+        ral.addLayout(self._actions_container)
         ral.addWidget(_vspacer(10))
         r3g.addWidget(ra, 0, 1)
         lay.addWidget(r3)
         lay.addStretch()
 
+    # ── Live data refresh ──────────────────────────────────────────
+
+    def refresh(self, score, web_report):
+        """Update all Web Tracking widgets with live WebReport data."""
+        if web_report is None:
+            return
+        t = _t()
+
+        def _rget(key, default=None):
+            if isinstance(web_report, dict):
+                return web_report.get(key, default)
+            return getattr(web_report, key, default)
+
+        web_score = _rget("web_score", 0.0)
+        severity = _rget("severity", "LOW")
+        tracker_hits = _rget("tracker_hits", [])
+        category_scores = _rget("category_scores", {})
+        active_categories = _rget("active_categories", [])
+        unique_count = _rget("unique_trackers_count", 0)
+        top_offenders = _rget("top_offenders", [])
+        fp_signals = _rget("fingerprint_signals", [])
+
+        # ── Tier pill ──
+        sev_labels = {"LOW": "Safe", "MEDIUM": "Moderate", "HIGH": "High Threat"}
+        self._tier_pill.setText(
+            f"● {int(web_score)} — {sev_labels.get(severity, severity)}")
+        if severity == "HIGH":
+            self._tier_pill.setStyleSheet(
+                "background-color: #FEE2E2; color: #991B1B;"
+                " border-radius: 14px; padding: 6px 16px;")
+        elif severity == "MEDIUM":
+            self._tier_pill.setStyleSheet(
+                "background-color: #FEF3C7; color: #92400E;"
+                " border-radius: 14px; padding: 6px 16px;")
+        else:
+            self._tier_pill.setStyleSheet(
+                "background-color: #D1FAE5; color: #065F46;"
+                " border-radius: 14px; padding: 6px 16px;")
+
+        # ── Stat cards ──
+        def _score_color(v):
+            if v < 25: return t["accent"]
+            elif v < 50: return t["warning"]
+            else: return t["danger"]
+
+        self._trackers_card.update_value(str(unique_count),
+                                          t["danger"] if unique_count > 0 else t["accent"])
+        self._trackers_card.update_subtext(
+            f"{unique_count} unique tracker{'s' if unique_count != 1 else ''} found"
+            if unique_count else "No trackers detected",
+            t["danger"] if unique_count > 0 else t["accent"])
+
+        n_cats = len(active_categories)
+        self._categories_card.update_value(str(n_cats),
+                                            t["warning"] if n_cats >= 2 else t["accent"])
+        self._categories_card.update_subtext(
+            ", ".join(active_categories[:3]) if active_categories else "None active",
+            t["text_secondary"])
+
+        n_fp = sum(1 for s in fp_signals
+                   if getattr(s, "detected", False) if isinstance(s, object))
+        fp_color = t["danger"] if n_fp > 0 else t["accent"]
+        self._fp_card.update_value(str(n_fp), fp_color)
+        self._fp_card.update_subtext(
+            f"{n_fp} signal{'s' if n_fp != 1 else ''} detected" if n_fp
+            else "No fingerprinting detected", fp_color)
+
+        self._score_card.update_value(int(web_score), _score_color(web_score))
+        sev_sub = {"LOW": "Low risk", "MEDIUM": "Moderate risk",
+                   "HIGH": "High risk"}
+        self._score_card.update_subtext(sev_sub.get(severity, ""),
+                                         _score_color(web_score))
+
+        # ── Tracker domains table ──
+        dom_layout = self._dom_card.layout()
+        for w in self._dom_rows:
+            dom_layout.removeWidget(w)
+            w.deleteLater()
+        self._dom_rows.clear()
+
+        if tracker_hits:
+            insert_idx = dom_layout.indexOf(self._dom_spacer)
+            # Sort by individual_score descending
+            sorted_hits = sorted(tracker_hits,
+                                  key=lambda h: getattr(h, "individual_score", 0),
+                                  reverse=True)
+            for hit in sorted_hits[:10]:
+                domain = getattr(hit, "domain", "unknown")
+                cat = getattr(hit, "tracker_category", "unknown")
+                ind_score = getattr(hit, "individual_score", 0)
+                sev = getattr(hit, "severity", "LOW")
+                row = table_row(self._dom_card,
+                                [(200, domain, "bold"),
+                                 (120, cat.upper(), "pill"),
+                                 (80, f"{ind_score:.0f}"),
+                                 (120, sev, "pill")])
+                self._dom_rows.append(row)
+                dom_layout.insertWidget(insert_idx, row)
+                insert_idx += 1
+        else:
+            placeholder = QLabel("    ✅ No trackers detected. Network is clean.")
+            placeholder.setFont(QFont("Segoe UI", 11))
+            placeholder.setStyleSheet(f"color: {t['accent']};")
+            placeholder.setContentsMargins(22, 15, 22, 15)
+            self._dom_rows.append(placeholder)
+            insert_idx = dom_layout.indexOf(self._dom_spacer)
+            dom_layout.insertWidget(insert_idx, placeholder)
+
+        # ── Category score bars ──
+        def _bar_color(v):
+            if v < 40: return t["accent"]
+            elif v < 70: return t["warning"]
+            else: return t["danger"]
+
+        a_score = category_scores.get("Analytics", 0)
+        ad_score = category_scores.get("Advertising", 0)
+        s_score = category_scores.get("Social", 0)
+        tel_score = category_scores.get("Telemetry", 0)
+        fp_score = category_scores.get("Fingerprint", 0)
+
+        self._analytics_bar.update_value(a_score, _bar_color(a_score))
+        self._advertising_bar.update_value(ad_score, _bar_color(ad_score))
+        self._social_bar.update_value(s_score, _bar_color(s_score))
+        self._telemetry_bar.update_value(tel_score, _bar_color(tel_score))
+        self._fingerprint_bar.update_value(fp_score, _bar_color(fp_score))
+
+        # ── Donut chart ──
+        cat_hit_counts = {}
+        for hit in tracker_hits:
+            cat = getattr(hit, "tracker_category", "Other")
+            cat_hit_counts[cat] = cat_hit_counts.get(cat, 0) + 1
+        total_hits = sum(cat_hit_counts.values()) or 1
+        self._donut.set_data(cat_hit_counts, total_hits)
+
+        # ── Category legend ──
+        _cat_colors_map = {
+            "Advertising": "#3B82F6", "Analytics": "#10B981",
+            "Fingerprint": "#EF4444", "Social": "#8B5CF6",
+            "Telemetry": "#F59E0B",
+        }
+        for w in self._cat_legend_widgets:
+            self._cat_legend_container.removeWidget(w)
+            w.deleteLater()
+        self._cat_legend_widgets.clear()
+
+        for cat_name in ["Advertising", "Analytics", "Fingerprint",
+                         "Social", "Telemetry"]:
+            count = cat_hit_counts.get(cat_name, 0)
+            pct = f"{count / total_hits * 100:.0f}%" if total_hits > 1 else "0%"
+            color = _cat_colors_map.get(cat_name, t["text_muted"])
+
+            cfr = QWidget()
+            cfl = QHBoxLayout(cfr)
+            cfl.setContentsMargins(22, 5, 22, 5)
+            clbl = QLabel(f"◉ {cat_name}")
+            clbl.setFont(QFont("Segoe UI", 11))
+            clbl.setStyleSheet(f"color: {color};")
+            cfl.addWidget(clbl)
+            cfl.addStretch()
+            cv = QLabel(f"{count}")
+            cv.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+            cv.setStyleSheet(f"color: {t['text_primary']};")
+            cfl.addWidget(cv)
+            cpct = QLabel(f"  {pct}")
+            cpct.setFont(QFont("Segoe UI", 10))
+            cpct.setStyleSheet(f"color: {t['text_secondary']};")
+            cfl.addWidget(cpct)
+            self._cat_legend_container.addWidget(cfr)
+            self._cat_legend_widgets.append(cfr)
+
+        # ── Fingerprint signals ──
+        for w in self._fp_widgets:
+            self._fp_container.removeWidget(w)
+            w.deleteLater()
+        self._fp_widgets.clear()
+
+        detected_fps = [s for s in fp_signals if getattr(s, "detected", False)]
+        if detected_fps:
+            for sig in detected_fps:
+                sig_type = getattr(sig, "signal_type", "UNKNOWN")
+                confidence = getattr(sig, "confidence", 0)
+                desc = getattr(sig, "description", "")
+                # Icon by type
+                icon_map = {"CANVAS": "🎨", "WEBGL": "🖼️", "FONT": "🔤",
+                            "BATTERY": "🔋", "AUDIO": "🔊"}
+                icon = icon_map.get(sig_type, "🔏")
+                lbl = QLabel(
+                    f"{icon}  {sig_type} — confidence: {confidence:.0%}")
+                lbl.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+                lbl.setStyleSheet(f"color: {t['danger']};")
+                lbl.setWordWrap(True)
+                self._fp_container.addWidget(lbl)
+                self._fp_widgets.append(lbl)
+                if desc:
+                    dlbl = QLabel(f"     {desc}")
+                    dlbl.setFont(QFont("Segoe UI", 10))
+                    dlbl.setStyleSheet(f"color: {t['text_secondary']};")
+                    dlbl.setWordWrap(True)
+                    self._fp_container.addWidget(dlbl)
+                    self._fp_widgets.append(dlbl)
+        else:
+            ok = QLabel("✅  No fingerprinting attempts detected.")
+            ok.setFont(QFont("Segoe UI", 11))
+            ok.setStyleSheet(f"color: {t['accent']};")
+            self._fp_container.addWidget(ok)
+            self._fp_widgets.append(ok)
+
+        # ── Top offenders ──
+        for w in self._offender_widgets:
+            self._offenders_container.removeWidget(w)
+            w.deleteLater()
+        self._offender_widgets.clear()
+
+        if top_offenders:
+            for i, domain in enumerate(top_offenders[:5], 1):
+                lbl = QLabel(f"  {i}.  {domain}")
+                lbl.setFont(QFont("Segoe UI", 11,
+                                   QFont.Weight.Bold if i <= 3
+                                   else QFont.Weight.Normal))
+                lbl.setStyleSheet(
+                    f"color: {t['danger'] if i <= 2 else t['warning'] if i <= 3 else t['text_primary']};")
+                lbl.setContentsMargins(0, 4, 0, 4)
+                self._offenders_container.addWidget(lbl)
+                self._offender_widgets.append(lbl)
+        else:
+            ok = QLabel("✅  No tracker offenders detected.")
+            ok.setFont(QFont("Segoe UI", 11))
+            ok.setStyleSheet(f"color: {t['accent']};")
+            self._offenders_container.addWidget(ok)
+            self._offender_widgets.append(ok)
+
+        # ── Recommended actions (update based on active categories) ──
+        for w in self._action_widgets:
+            self._actions_container.removeWidget(w)
+            w.deleteLater()
+        self._action_widgets.clear()
+
+        if category_scores.get("Fingerprint", 0) >= 40:
+            w = ActionCard(None, "🔏", "Enable Fingerprint Resistance",
+                           "Set privacy.resistFingerprinting=true in Firefox.", "APPLY")
+            self._actions_container.addWidget(w)
+            self._action_widgets.append(w)
+        if category_scores.get("Advertising", 0) >= 50:
+            w = ActionCard(None, "🛡️", "Block Ad Networks",
+                           "Enable DNS-level ad blocking (Pi-hole, NextDNS).", "REVIEW")
+            self._actions_container.addWidget(w)
+            self._action_widgets.append(w)
+        if category_scores.get("Social", 0) >= 50:
+            w = ActionCard(None, "🔗", "Isolate Social Trackers",
+                           "Use Firefox containers to isolate social logins.", "REVIEW")
+            self._actions_container.addWidget(w)
+            self._action_widgets.append(w)
+        if category_scores.get("Telemetry", 0) >= 55:
+            w = ActionCard(None, "⚠️", "Block Telemetry",
+                           "Review app telemetry settings; block at firewall.", "REVIEW")
+            self._actions_container.addWidget(w)
+            self._action_widgets.append(w)
+        if category_scores.get("Analytics", 0) >= 40:
+            w = ActionCard(None, "📊", "Block Analytics Scripts",
+                           "Install uBlock Origin to block analytics trackers.", "REVIEW")
+            self._actions_container.addWidget(w)
+            self._action_widgets.append(w)
+        if not self._action_widgets:
+            w = ActionCard(None, "✅", "All Clear",
+                           "No tracker categories exceed alert thresholds.")
+            self._actions_container.addWidget(w)
+            self._action_widgets.append(w)
+
 
 class DonutChart(QWidget):
-    """Donut chart painted with QPainter."""
+    """Donut chart painted with QPainter — supports dynamic data."""
+    _CAT_COLORS = {
+        "Advertising": "#3B82F6",
+        "Analytics": "#10B981",
+        "Fingerprint": "#EF4444",
+        "Social": "#8B5CF6",
+        "Telemetry": "#F59E0B",
+    }
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setStyleSheet("background: transparent;")
+        self._data: dict[str, int] = {}
+        self._total: int = 0
+
+    def set_data(self, cat_counts: dict[str, int], total: int) -> None:
+        """Update the chart data and repaint."""
+        self._data = cat_counts
+        self._total = total
+        self.update()
 
     def paintEvent(self, event):
         t = _t()
@@ -906,23 +1558,36 @@ class DonutChart(QWidget):
         cx, cy = w / 2, h / 2
         r = min(w, h) / 2 - 10
         rect = QRectF(cx - r, cy - r, 2 * r, 2 * r)
-        segments = [(151, "#3B82F6"), (112, "#10B981"),
-                    (54, "#EF4444"), (43, "#8B5CF6")]
+
+        if self._data and self._total > 0:
+            # Dynamic segments from real data
+            segments: list[tuple[int, str]] = []
+            for cat, count in self._data.items():
+                extent = int(count / self._total * 360)
+                color = self._CAT_COLORS.get(cat, "#6B7280")
+                if extent > 0:
+                    segments.append((extent, color))
+        else:
+            # Default placeholder ring
+            segments = [(360, "#374151")]
+
         start = 90
         for extent, color in segments:
             pen = QPen(QColor(color), 18)
             pen.setCapStyle(Qt.PenCapStyle.FlatCap)
             painter.setPen(pen)
-            painter.drawArc(rect, start*16, extent*16)
+            painter.drawArc(rect, start * 16, extent * 16)
             start += extent
 
+        # Center label
         painter.setPen(QColor(t["text_primary"]))
         painter.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
-        painter.drawText(QRectF(0, cy-15, w, 25),
-                         Qt.AlignmentFlag.AlignCenter, "3.4k")
+        center_text = str(self._total) if self._total > 0 else "--"
+        painter.drawText(QRectF(0, cy - 15, w, 25),
+                         Qt.AlignmentFlag.AlignCenter, center_text)
         painter.setPen(QColor(t["text_muted"]))
         painter.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
-        painter.drawText(QRectF(0, cy+8, w, 15),
+        painter.drawText(QRectF(0, cy + 8, w, 15),
                          Qt.AlignmentFlag.AlignCenter, "TOTAL HITS")
         painter.end()
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 import queue
 import sys
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -55,6 +56,11 @@ class DataBridge:
         # Full module reports (set by monitor loop)
         self._reports: dict = {}
         self._reports_lock = threading.Lock()
+
+        # Session management (Milestone 06)
+        self._session_start: str = datetime.now(timezone.utc).isoformat()
+        self._session_running: bool = True
+        self._session_lock = threading.Lock()
 
     # ── Producer API (called from background threads) ────────────────
 
@@ -191,3 +197,39 @@ class DataBridge:
         with self._reports_lock:
             self._reports.clear()
         log.debug("DataBridge cleared")
+
+    # ── Session management (Milestone 06) ────────────────────────────
+
+    def get_session_start(self) -> str:
+        """Return the ISO-8601 timestamp when the session started."""
+        with self._session_lock:
+            return self._session_start
+
+    def get_session_duration_minutes(self) -> float:
+        """Return session duration in minutes."""
+        with self._session_lock:
+            try:
+                start = datetime.fromisoformat(self._session_start)
+                now = datetime.now(timezone.utc)
+                return round((now - start).total_seconds() / 60, 2)
+            except (ValueError, TypeError):
+                return 0.0
+
+    def is_session_running(self) -> bool:
+        """Return True if the monitoring session is active."""
+        with self._session_lock:
+            return self._session_running
+
+    def stop_session(self) -> None:
+        """Pause the monitoring session."""
+        with self._session_lock:
+            self._session_running = False
+        log.info("Session paused")
+
+    def start_session(self) -> None:
+        """Resume (or start) the monitoring session."""
+        with self._session_lock:
+            if not self._session_running:
+                self._session_start = datetime.now(timezone.utc).isoformat()
+            self._session_running = True
+        log.info("Session started/resumed")
