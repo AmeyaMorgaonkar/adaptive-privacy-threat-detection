@@ -23,6 +23,24 @@ from ui.components import (
     pill_button, HoverRow,
 )
 
+# Canonical list of actions (UI-only source-of-truth for All Actions page).
+# Derived from modules/auto_responder.py and modules/wifi_responder.py.
+ALL_ACTIONS = [
+    {"name": "Auto-Isolation High-Risk IP", "module": "System", "type": "AUTO", "enabled": True, "last": "2m ago", "desc": "Disconnects nodes showing high-risk outbound…"},
+    {"name": "Rogue AP De-auth", "module": "WiFi", "type": "AUTO", "enabled": True, "last": "14m ago", "desc": "Sends de-auth packets to unauthorized APs…"},
+    {"name": "WPA3 Enforcement", "module": "WiFi", "type": "AUTO", "enabled": True, "last": "--", "desc": "Auto-upgrades connecting clients to WPA3…"},
+    {"name": "Auto-disconnect Suspicious WiFi", "module": "WiFi", "type": "AUTO", "enabled": True, "last": "--", "desc": "Disconnects from suspicious networks automatically."},
+    {"name": "Exfil Threshold Alert", "module": "Behaviour", "type": "AUTO", "enabled": True, "last": "1h ago", "desc": "Logs warning when data egress exceeds limit…"},
+    {"name": "Beacon Frequency Monitor", "module": "Behaviour", "type": "AUTO", "enabled": True, "last": "12h ago", "desc": "Detects C2 beaconing patterns in network…"},
+    {"name": "Manual Credential Flush", "module": "Web Tracking", "type": "MANUAL", "enabled": False, "last": "--", "desc": "Clears all active session tokens for the user…"},
+    {"name": "Tracker Pixel Scrubber", "module": "Web Tracking", "type": "MANUAL", "enabled": False, "last": "2d ago", "desc": "Filters invisible tracking pixels from pages…"},
+    {"name": "Block Ad Networks", "module": "Web Tracking", "type": "AUTO", "enabled": True, "last": "42m ago", "desc": "Enable DNS-level ad blocking (Pi-hole, NextDNS)."},
+    {"name": "Kernel Integrity Check", "module": "System", "type": "AUTO", "enabled": True, "last": "5m ago", "desc": "Verifies boot sequence and kernel space…"},
+    {"name": "SSH Bruteforce Lockout", "module": "System", "type": "AUTO", "enabled": True, "last": "3h ago", "desc": "Blocks IPs with >5 failed login attempts…"},
+    {"name": "Manual Port Sweep", "module": "System", "type": "MANUAL", "enabled": False, "last": "Yesterday", "desc": "Initiates comprehensive scan of open ports…"},
+    {"name": "Manual Node Blacklist", "module": "System", "type": "MANUAL", "enabled": False, "last": "--", "desc": "Hard-blocks hardware addresses from access…"},
+]
+
 
 def _t():
     return get_card_tokens()
@@ -71,12 +89,12 @@ class DashboardPage(QWidget):
 
         self.score_card = StatCard(r1, "Overall Threat Score", "--",
                                   "Waiting for data…", top_icon="🎯")
-        self.threats_card = StatCard(r1, "Active Threats", "0",
-                                    "No threats detected",
+        self.threats_card = StatCard(r1, "Active Threats", "--",
+                        "No threats detected",
                                     value_color=t["danger"], top_icon="⚠️")
-        self.actions_card = StatCard(r1, "Actions Taken", "12",
-                                    "Resolved automatically",
-                                    value_color=t["accent"], top_icon="✅")
+        self.actions_card = StatCard(r1, "Actions Taken", "--",
+                        "Resolved automatically",
+                        value_color=t["accent"], top_icon="✅")
         self.scan_card = StatCard(r1, "Last Scan", "--",
                                  "System continuous monitoring",
                                  value_size=24, top_icon="⏱")
@@ -116,12 +134,17 @@ class DashboardPage(QWidget):
         ra_lay.setContentsMargins(0, 0, 0, 0)
         ra_lay.setSpacing(0)
         ra_lay.addWidget(section_header(ra_card, "Recommended Actions"))
-        ra_lay.addWidget(ActionCard(ra_card, "🛡️", "Update Firewall Rules",
-                                    "Web module threshold met", "REVIEW"))
-        ra_lay.addWidget(ActionCard(ra_card, "🔑", "Rotate API Keys",
-                                    "Scheduled rotation due", "APPLY"))
-        ra_lay.addWidget(ActionCard(ra_card, "🚫", "Block IP Range",
-                                    "Suspicious behaviour detected", "REVIEW"))
+        # Dynamic recommended actions container (populated in refresh)
+        self._recommended_widget = QWidget(ra_card)
+        self._recommended_layout = QVBoxLayout(self._recommended_widget)
+        self._recommended_layout.setContentsMargins(0, 0, 0, 0)
+        self._recommended_layout.setSpacing(8)
+        # initial placeholder
+        self._no_recs_lbl = QLabel("No recommended actions")
+        self._no_recs_lbl.setFont(QFont("Segoe UI", 11))
+        self._no_recs_lbl.setStyleSheet(f"color: {t['text_secondary']};")
+        self._recommended_layout.addWidget(self._no_recs_lbl)
+        ra_lay.addWidget(self._recommended_widget)
         ra_lay.addWidget(_vspacer(8))
         r2g.addWidget(ra_card, 0, 1)
         lay.addWidget(r2)
@@ -157,10 +180,14 @@ class DashboardPage(QWidget):
         sg_grid = QGridLayout(sg)
         sg_grid.setContentsMargins(0, 0, 0, 0)
         sg_grid.setSpacing(8)
-        sg_grid.addWidget(mini_stat(sg, "🛑", "1,204", "Blocked Req."), 0, 0)
-        sg_grid.addWidget(mini_stat(sg, "⚙️", "4", "Suspicious\nProc."), 0, 1)
-        sg_grid.addWidget(mini_stat(sg, "📡", "8", "Networks\nScanned"), 1, 0)
-        sg_grid.addWidget(mini_stat(sg, "🔄", "3.2 GB", "Data Sent"), 1, 1)
+        self._mini_blocked = mini_stat(sg, "🛑", "--", "Blocked Req.")
+        sg_grid.addWidget(self._mini_blocked, 0, 0)
+        self._mini_suspicious = mini_stat(sg, "⚙️", "--", "Suspicious\nProc.")
+        sg_grid.addWidget(self._mini_suspicious, 0, 1)
+        self._mini_networks = mini_stat(sg, "📡", "--", "Networks\nScanned")
+        sg_grid.addWidget(self._mini_networks, 1, 0)
+        self._mini_data_sent = mini_stat(sg, "🔄", "--", "Data Sent")
+        sg_grid.addWidget(self._mini_data_sent, 1, 1)
         r3g.addWidget(sg, 0, 1)
         lay.addWidget(r3)
         lay.addStretch()
@@ -183,6 +210,114 @@ class DashboardPage(QWidget):
             _t()["danger"] if n else _t()["accent"])
 
         self.scan_card.update_value("Just now")
+
+        # ── Live module reports (used for mini-stats and recommended actions)
+        reports = {}
+        try:
+            reports = self.data_bridge.get_reports() if getattr(self, "data_bridge", None) else {}
+        except Exception:
+            reports = {}
+
+        web_report = reports.get("web_report")
+        behavioral_report = reports.get("behavioral_report")
+        wifi_report = reports.get("wifi_report")
+
+        # ── Recommended actions (prefer monitor-provided list, otherwise derive from score)
+        try:
+            # clear previous items
+            while self._recommended_layout.count():
+                item = self._recommended_layout.takeAt(0)
+                w = item.widget()
+                if w is not None:
+                    w.deleteLater()
+
+            recs = reports.get("recommended_actions")
+            if not recs:
+                # fallback: derive from score
+                recs = []
+                if score.web_score >= 60:
+                    recs.append({"icon": "🛡️", "title": "Update Firewall Rules", "message": "Web module threshold met", "tag": "REVIEW"})
+                if score.wifi_score >= 60:
+                    recs.append({"icon": "🚫", "title": "Block IP Range", "message": "Suspicious behaviour detected", "tag": "REVIEW"})
+                if score.unified_score >= 80:
+                    recs.append({"icon": "🔑", "title": "Rotate API Keys", "message": "Scheduled rotation due", "tag": "APPLY"})
+
+            if not recs:
+                self._recommended_layout.addWidget(self._no_recs_lbl)
+            else:
+                # rec may be list of tuples (legacy) or dicts from monitor
+                for r in recs:
+                    if isinstance(r, dict):
+                        icon = r.get("icon", "")
+                        title = r.get("title", "")
+                        sub = r.get("message", "")
+                        tag = r.get("tag", "")
+                    else:
+                        # legacy tuple format
+                        icon, title, sub, tag = r
+                    self._recommended_layout.addWidget(ActionCard(self._recommended_widget, icon, title, sub, tag))
+        except Exception:
+            try:
+                self._recommended_layout.addWidget(self._no_recs_lbl)
+            except Exception:
+                pass
+
+        # Actions taken (from auto-responder): show/hide based on availability
+        actions_taken = reports.get("actions_taken")
+        if actions_taken is not None:
+            self.actions_card.show()
+            self.actions_card.update_value(actions_taken)
+        else:
+            self.actions_card.hide()
+
+        # Helper to extract list-like fields from dataclass or dict
+        def _pluck_list(obj, key):
+            if obj is None:
+                return []
+            if isinstance(obj, dict):
+                return obj.get(key, []) or []
+            return getattr(obj, key, []) or []
+
+        # Blocked requests (sum of hit_count)
+        if web_report:
+            hits = _pluck_list(web_report, "tracker_hits")
+            try:
+                blocked_count = sum(getattr(h, "hit_count", h.get("hit_count", 1)) if hasattr(h, "__dict__") or isinstance(h, dict) else 1 for h in hits)
+            except Exception:
+                blocked_count = 0
+            self._mini_blocked.set_visible(True)
+            self._mini_blocked.update_value(f"{blocked_count:,}")
+        else:
+            self._mini_blocked.set_visible(False)
+
+        # Suspicious processes
+        if behavioral_report:
+            procs = _pluck_list(behavioral_report, "anomalous_processes")
+            self._mini_suspicious.set_visible(True)
+            self._mini_suspicious.update_value(str(len(procs)))
+        else:
+            self._mini_suspicious.set_visible(False)
+
+        # Networks scanned
+        if wifi_report:
+            nets = _pluck_list(wifi_report, "nearby_networks")
+            self._mini_networks.set_visible(True)
+            self._mini_networks.update_value(str(len(nets)))
+        else:
+            self._mini_networks.set_visible(False)
+
+        # Data sent (sum of data_volume_kb -> GB)
+        if web_report:
+            hits = _pluck_list(web_report, "tracker_hits")
+            try:
+                total_kb = sum(getattr(h, "data_volume_kb", h.get("data_volume_kb", 0.0)) if hasattr(h, "__dict__") or isinstance(h, dict) else 0.0 for h in hits)
+            except Exception:
+                total_kb = 0.0
+            total_gb = total_kb / 1024.0 / 1024.0
+            self._mini_data_sent.set_visible(True)
+            self._mini_data_sent.update_value(f"{total_gb:.1f} GB")
+        else:
+            self._mini_data_sent.set_visible(False)
 
         # Module bars
         def bar_color(v):
@@ -359,11 +494,11 @@ class WiFiSecurityPage(QWidget):
         r3g.addWidget(leak, 0, 0)
 
         # Detected threats card (dynamic)
-        threats_frame = GlassFrame(r3)
-        tc_lay = QVBoxLayout(threats_frame)
+        self._threats_frame = GlassFrame(r3)
+        tc_lay = QVBoxLayout(self._threats_frame)
         tc_lay.setContentsMargins(0, 0, 0, 0)
         tc_lay.setSpacing(0)
-        tc_lay.addWidget(section_header(threats_frame, "Detected Threats"))
+        tc_lay.addWidget(section_header(self._threats_frame, "Detected Threats"))
         self._threats_container = QVBoxLayout()
         self._threats_container.setContentsMargins(22, 0, 22, 15)
         self._threats_container.setSpacing(4)
@@ -373,14 +508,41 @@ class WiFiSecurityPage(QWidget):
         self._threats_container.addWidget(no_threat)
         self._threat_widgets: list[QWidget] = [no_threat]
         tc_lay.addLayout(self._threats_container)
-        r3g.addWidget(threats_frame, 0, 1)
+        r3g.addWidget(self._threats_frame, 0, 1)
         lay.addWidget(r3)
         lay.addStretch()
 
     def refresh(self, score, wifi_report):
         """Update all WiFi page widgets from real WiFiReport data."""
+        # Hide dynamic sections when no report available
         if wifi_report is None:
+            try:
+                self._net_card.setVisible(False)
+            except Exception:
+                pass
+            try:
+                self._gauge.setVisible(False)
+            except Exception:
+                pass
+            try:
+                self._threats_frame.setVisible(False)
+            except Exception:
+                pass
             return
+        else:
+            # Ensure dynamic sections are visible
+            try:
+                self._net_card.setVisible(True)
+            except Exception:
+                pass
+            try:
+                self._gauge.setVisible(True)
+            except Exception:
+                pass
+            try:
+                self._threats_frame.setVisible(True)
+            except Exception:
+                pass
         t = _t()
 
         def _rget(key, default=None):
@@ -652,11 +814,11 @@ class BehaviourAnalysisPage(QWidget):
         r2g.setColumnStretch(1, 2)
 
         # Flagged Processes table (dynamic)
-        fp = GlassFrame(r2)
-        fp_lay = QVBoxLayout(fp)
+        self._fp_frame = GlassFrame(r2)
+        fp_lay = QVBoxLayout(self._fp_frame)
         fp_lay.setContentsMargins(0, 0, 0, 0)
         fp_lay.setSpacing(0)
-        fph = QWidget(fp)
+        fph = QWidget(self._fp_frame)
         fphl = QHBoxLayout(fph)
         fphl.setContentsMargins(22, 22, 22, 12)
         fpt = QLabel("Flagged Processes")
@@ -669,8 +831,8 @@ class BehaviourAnalysisPage(QWidget):
         fprl.setStyleSheet(f"color: {t['text_muted']};")
         fphl.addWidget(fprl)
         fp_lay.addWidget(fph)
-        self._fp_header = table_header(fp, [(180, "Process Name"), (80, "CPU%"),
-                                            (80, "Memory"), (80, "Risk")])
+        self._fp_header = table_header(self._fp_frame, [(180, "Process Name"), (80, "CPU%"),
+                            (80, "Memory"), (80, "Risk")])
         fp_lay.addWidget(self._fp_header)
         self._fp_container = fp_lay
         self._fp_rows: list[QWidget] = []
@@ -682,14 +844,14 @@ class BehaviourAnalysisPage(QWidget):
         fp_lay.addWidget(placeholder)
         self._fp_spacer = _vspacer(10)
         fp_lay.addWidget(self._fp_spacer)
-        r2g.addWidget(fp, 0, 0)
+        r2g.addWidget(self._fp_frame, 0, 0)
 
         # Anomaly details list (dynamic)
-        anom_frame = GlassFrame(r2)
-        anom_lay = QVBoxLayout(anom_frame)
+        self._anom_frame = GlassFrame(r2)
+        anom_lay = QVBoxLayout(self._anom_frame)
         anom_lay.setContentsMargins(0, 0, 0, 0)
         anom_lay.setSpacing(0)
-        anom_lay.addWidget(section_header(anom_frame, "Detected Anomalies"))
+        anom_lay.addWidget(section_header(self._anom_frame, "Detected Anomalies"))
         self._anom_container = QVBoxLayout()
         self._anom_container.setContentsMargins(22, 0, 22, 15)
         self._anom_container.setSpacing(4)
@@ -699,7 +861,7 @@ class BehaviourAnalysisPage(QWidget):
         self._anom_container.addWidget(no_anom)
         self._anom_widgets: list[QWidget] = [no_anom]
         anom_lay.addLayout(self._anom_container)
-        r2g.addWidget(anom_frame, 0, 1)
+        r2g.addWidget(self._anom_frame, 0, 1)
         lay.addWidget(r2)
 
         # ── Rules + Alerts ──
@@ -752,8 +914,51 @@ class BehaviourAnalysisPage(QWidget):
 
     def refresh(self, score, behavioral_report):
         """Update all Behaviour Analysis widgets with live BehavioralReport data."""
+        # Hide dynamic sections when no report available
         if behavioral_report is None:
+            try:
+                self._score_card.setVisible(False)
+            except Exception:
+                pass
+            try:
+                self._susp_count_lbl.setVisible(False)
+            except Exception:
+                pass
+            try:
+                self._anomaly_card.setVisible(False)
+            except Exception:
+                pass
+            try:
+                self._fp_frame.setVisible(False)
+            except Exception:
+                pass
+            try:
+                self._anom_frame.setVisible(False)
+            except Exception:
+                pass
             return
+        else:
+            # Ensure dynamic sections are visible
+            try:
+                self._score_card.setVisible(True)
+            except Exception:
+                pass
+            try:
+                self._susp_count_lbl.setVisible(True)
+            except Exception:
+                pass
+            try:
+                self._anomaly_card.setVisible(True)
+            except Exception:
+                pass
+            try:
+                self._fp_frame.setVisible(True)
+            except Exception:
+                pass
+            try:
+                self._anom_frame.setVisible(True)
+            except Exception:
+                pass
         t = _t()
 
         def _rget(key, default=None):
@@ -1216,11 +1421,11 @@ class WebTrackingPage(QWidget):
         r3g.setColumnStretch(1, 1)
 
         # Top offenders list (dynamic)
-        offenders_frame = GlassFrame(r3)
-        off_lay = QVBoxLayout(offenders_frame)
+        self._offenders_frame = GlassFrame(r3)
+        off_lay = QVBoxLayout(self._offenders_frame)
         off_lay.setContentsMargins(0, 0, 0, 0)
         off_lay.setSpacing(0)
-        off_lay.addWidget(section_header(offenders_frame, "Top Offenders"))
+        off_lay.addWidget(section_header(self._offenders_frame, "Top Offenders"))
         self._offenders_container = QVBoxLayout()
         self._offenders_container.setContentsMargins(22, 0, 22, 15)
         self._offenders_container.setSpacing(4)
@@ -1230,7 +1435,7 @@ class WebTrackingPage(QWidget):
         self._offenders_container.addWidget(no_off)
         self._offender_widgets: list[QWidget] = [no_off]
         off_lay.addLayout(self._offenders_container)
-        r3g.addWidget(offenders_frame, 0, 0)
+        r3g.addWidget(self._offenders_frame, 0, 0)
 
         # Recommended actions (dynamic)
         ra = GlassFrame(r3)
@@ -1263,8 +1468,43 @@ class WebTrackingPage(QWidget):
 
     def refresh(self, score, web_report):
         """Update all Web Tracking widgets with live WebReport data."""
+        # Hide dynamic sections when no report available
         if web_report is None:
+            try:
+                self._dom_card.setVisible(False)
+            except Exception:
+                pass
+            try:
+                self._donut.setVisible(False)
+            except Exception:
+                pass
+            try:
+                self._offenders_frame.setVisible(False)
+            except Exception:
+                pass
+            try:
+                self._actions_container.setVisible(False)
+            except Exception:
+                pass
             return
+        else:
+            # Ensure dynamic sections are visible
+            try:
+                self._dom_card.setVisible(True)
+            except Exception:
+                pass
+            try:
+                self._donut.setVisible(True)
+            except Exception:
+                pass
+            try:
+                self._offenders_frame.setVisible(True)
+            except Exception:
+                pass
+            try:
+                self._actions_container.setVisible(True)
+            except Exception:
+                pass
         t = _t()
 
         def _rget(key, default=None):
@@ -1621,11 +1861,19 @@ class AllActionsPage(QWidget):
         r1g = QGridLayout(r1)
         r1g.setContentsMargins(0, 0, 0, 15)
         r1g.setSpacing(12)
-        r1g.addWidget(StatCard(r1, "Total Actions", "24", "", top_icon="☰"), 0, 0)
-        r1g.addWidget(StatCard(r1, "Active", "14", "",
-                               value_color=t["accent"], top_icon="✅"), 0, 1)
-        r1g.addWidget(StatCard(r1, "Inactive", "10", "",
-                               value_color=t["danger"], top_icon="⏸"), 0, 2)
+        # Compute totals from the canonical ALL_ACTIONS list
+        total_actions = len(ALL_ACTIONS)
+        active_actions = sum(1 for a in ALL_ACTIONS if a.get("enabled"))
+        inactive_actions = total_actions - active_actions
+
+        self.total_actions_card = StatCard(r1, "Total Actions", str(total_actions), "", top_icon="☰")
+        self.active_actions_card = StatCard(r1, "Active", str(active_actions), "",
+                           value_color=t["accent"], top_icon="✅")
+        self.inactive_actions_card = StatCard(r1, "Inactive", str(inactive_actions), "",
+                             value_color=t["danger"], top_icon="⏸")
+        r1g.addWidget(self.total_actions_card, 0, 0)
+        r1g.addWidget(self.active_actions_card, 0, 1)
+        r1g.addWidget(self.inactive_actions_card, 0, 2)
         for c in range(3):
             r1g.setColumnStretch(c, 1)
         lay.addWidget(r1)
@@ -1657,33 +1905,16 @@ class AllActionsPage(QWidget):
                                              (70, "Type"), (70, "Status"),
                                              (90, "Last Triggered"),
                                              (280, "Description")]))
-        actions = [
-            ("Auto-Isolation High-Risk IP", "System", "AUTO", True, "2m ago",
-             "Disconnects nodes showing high-risk outbound…"),
-            ("Rogue AP De-auth", "WiFi", "AUTO", True, "14m ago",
-             "Sends de-auth packets to unauthorized APs…"),
-            ("Manual Credential Flush", "Web Tracking", "MANUAL", False, "--",
-             "Clears all active session tokens for the user…"),
-            ("Exfil Threshold Alert", "Behaviour", "AUTO", True, "1h ago",
-             "Logs warning when data egress exceeds limit…"),
-            ("Cookie Injection Block", "Web Tracking", "AUTO", True, "42m ago",
-             "Prevents cross-site cookie manipulation…"),
-            ("SSH Bruteforce Lockout", "System", "AUTO", True, "3h ago",
-             "Blocks IPs with >5 failed login attempts…"),
-            ("Manual Port Sweep", "System", "MANUAL", False, "Yesterday",
-             "Initiates comprehensive scan of open ports…"),
-            ("Beacon Frequency Monitor", "Behaviour", "AUTO", True, "12h ago",
-             "Detects C2 beaconing patterns in network…"),
-            ("WPA3 Enforcement", "WiFi", "AUTO", True, "--",
-             "Auto-upgrades connecting clients to WPA3…"),
-            ("Tracker Pixel Scrubber", "Web Tracking", "MANUAL", False, "2d ago",
-             "Filters invisible tracking pixels from pages…"),
-            ("Kernel Integrity Check", "System", "AUTO", True, "5m ago",
-             "Verifies boot sequence and kernel space…"),
-            ("Manual Node Blacklist", "System", "MANUAL", False, "--",
-             "Hard-blocks hardware addresses from access…"),
-        ]
-        for name, mod, typ, on, last, desc in actions:
+        # Use the canonical ALL_ACTIONS list defined at module level
+        actions = ALL_ACTIONS
+        for a in actions:
+            name = a.get("name", "Unnamed Action")
+            mod = a.get("module", "Unknown")
+            typ = a.get("type", "MANUAL")
+            on = a.get("enabled", False)
+            last = a.get("last", "--")
+            desc = a.get("desc", "")
+            
             fr = HoverRow(tbl)
             fl = QHBoxLayout(fr)
             fl.setContentsMargins(22, 10, 22, 10)
@@ -1714,11 +1945,41 @@ class AllActionsPage(QWidget):
             fl.addWidget(d_lbl, 1)
             tbl_lay.addWidget(fr)
         lay.addWidget(tbl)
+        fr = HoverRow(tbl)
+        fl = QHBoxLayout(fr)
+        fl.setContentsMargins(22, 10, 22, 10)
+        fl.setSpacing(5)
+        n_lbl = QLabel(name)
+        n_lbl.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        n_lbl.setStyleSheet(f"color: {t['text_primary']};")
+        n_lbl.setFixedWidth(190)
+        fl.addWidget(n_lbl)
+        m_lbl = QLabel(mod)
+        m_lbl.setFont(QFont("Segoe UI", 11))
+        m_lbl.setStyleSheet(f"color: {t['text_secondary']};")
+        m_lbl.setFixedWidth(90)
+        fl.addWidget(m_lbl)
+        pill = PillLabel(typ, typ)
+        pill.setFixedWidth(70)
+        fl.addWidget(pill)
+        sw = ToggleSwitch(fr, checked=on)
+        fl.addWidget(sw)
+        l_lbl = QLabel(last)
+        l_lbl.setFont(QFont("Segoe UI", 11))
+        l_lbl.setStyleSheet(f"color: {t['text_secondary']};")
+        l_lbl.setFixedWidth(90)
+        fl.addWidget(l_lbl)
+        d_lbl = QLabel(desc)
+        d_lbl.setFont(QFont("Segoe UI", 11))
+        d_lbl.setStyleSheet(f"color: {t['text_secondary']};")
+        fl.addWidget(d_lbl, 1)
+        tbl_lay.addWidget(fr)
+        lay.addWidget(tbl)
 
         pag = QWidget()
         pag_l = QHBoxLayout(pag)
         pag_l.setContentsMargins(0, 5, 0, 15)
-        pag_info = QLabel("Showing 1-12 of 24 actions")
+        pag_info = QLabel(f"Showing 1-12 of {total_actions} actions")
         pag_info.setFont(QFont("Segoe UI", 11))
         pag_info.setStyleSheet(f"color: {t['accent']};")
         pag_l.addWidget(pag_info)

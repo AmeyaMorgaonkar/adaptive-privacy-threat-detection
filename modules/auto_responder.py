@@ -88,6 +88,82 @@ class AutoResponder:
 
         return fired
 
+    def recommend(
+        self,
+        score: "ThreatScore",
+        wifi_report=None,
+        behavioral_report=None,
+        web_report=None,
+    ) -> list[dict]:
+        """Return a list of recommended actions (UI-friendly dicts).
+
+        This is a *suggestion* API — it does not change state or fire
+        any actions. Each recommendation is a dict with keys:
+          - action_key: internal string id
+          - icon: short emoji/icon
+          - title: short title
+          - message: explanatory subtext
+          - tag: action tag label (e.g., REVIEW, APPLY)
+        """
+        recs: list[dict] = []
+
+        try:
+            web_score = getattr(score, "web_score", 0)
+            wifi_score = getattr(score, "wifi_score", 0)
+            unified = getattr(score, "unified_score", 0)
+
+            # Web-driven recommendations
+            if web_score >= 65:
+                recs.append({
+                    "action_key": "recommend_update_firewall",
+                    "icon": "🛡️",
+                    "title": "Update Firewall Rules",
+                    "message": "Web module threshold met",
+                    "tag": "REVIEW",
+                })
+            if web_score >= 50:
+                recs.append({
+                    "action_key": "recommend_block_ad_networks",
+                    "icon": "🚫",
+                    "title": "Block Ad Networks",
+                    "message": "Reduce advertising tracking exposure",
+                    "tag": "APPLY",
+                })
+
+            # Wi-Fi-driven recommendations
+            if wifi_score >= 60:
+                recs.append({
+                    "action_key": "recommend_block_ip_range",
+                    "icon": "🚫",
+                    "title": "Block IP Range",
+                    "message": "Suspicious behaviour detected",
+                    "tag": "REVIEW",
+                })
+            if wifi_score >= 80:
+                recs.append({
+                    "action_key": "recommend_isolate_node",
+                    "icon": "⚠️",
+                    "title": "Isolate High-Risk Node",
+                    "message": "Isolate device with high outbound risk",
+                    "tag": "APPLY",
+                })
+
+            # Unified / high-severity recommendation
+            if unified >= 80:
+                recs.insert(0, {
+                    "action_key": "recommend_rotate_api_keys",
+                    "icon": "🔑",
+                    "title": "Rotate API Keys",
+                    "message": "Recommended in high-risk environments",
+                    "tag": "APPLY",
+                })
+
+        except Exception:
+            # On error, return empty list (UI will show placeholder)
+            return []
+
+        return recs
+
     # ── Per-module handlers ──────────────────────────────────────────
 
     def _handle_wifi(self, wifi_score: float, report=None) -> list[str]:

@@ -495,10 +495,11 @@ class TestWiFiResponder(unittest.TestCase):
         mock_alert.assert_called_once()
         mock_vpn.assert_not_called()
 
+    @patch("modules.wifi_responder.WiFiResponder._apply_hardened_dns")
     @patch("modules.wifi_responder.WiFiResponder.toggle_vpn")
     @patch("modules.wifi_responder.WiFiResponder.alert_user")
     @patch("modules.wifi_responder.WiFiResponder.log_incident")
-    def test_high_triggers_vpn(self, mock_log, mock_alert, mock_vpn):
+    def test_high_triggers_vpn(self, mock_log, mock_alert, mock_vpn, mock_dns):
         from modules.wifi_responder import WiFiResponder
 
         responder = WiFiResponder()
@@ -508,13 +509,15 @@ class TestWiFiResponder(unittest.TestCase):
         mock_log.assert_called_once()
         mock_alert.assert_called_once()
         mock_vpn.assert_called_once_with(state=True)
+        mock_dns.assert_called_once()
 
+    @patch("modules.wifi_responder.WiFiResponder._apply_hardened_dns")
     @patch("modules.wifi_responder.WiFiResponder.disconnect_network")
     @patch("modules.wifi_responder.WiFiResponder.toggle_vpn")
     @patch("modules.wifi_responder.WiFiResponder.alert_user")
     @patch("modules.wifi_responder.WiFiResponder.log_incident")
     def test_critical_no_disconnect_by_default(
-        self, mock_log, mock_alert, mock_vpn, mock_disconnect
+        self, mock_log, mock_alert, mock_vpn, mock_disconnect, mock_dns
     ):
         """CRITICAL should NOT disconnect when AUTO_DISCONNECT_ON_ROGUE is False."""
         from modules.wifi_responder import WiFiResponder
@@ -529,8 +532,68 @@ class TestWiFiResponder(unittest.TestCase):
 
             # disconnect_network should NOT be called because the flag is off
             mock_disconnect.assert_not_called()
+            mock_dns.assert_called_once()
         finally:
             config.AUTO_DISCONNECT_ON_ROGUE = original
+
+    @patch("modules.wifi_responder.WiFiResponder._apply_hardened_dns")
+    @patch("modules.wifi_responder.WiFiResponder.toggle_vpn")
+    @patch("modules.wifi_responder.WiFiResponder.alert_user")
+    def test_unified_score_triggers_auto_protection(
+        self, mock_alert, mock_vpn, mock_dns
+    ):
+        from modules.wifi_responder import WiFiResponder
+
+        responder = WiFiResponder()
+        report = self._make_report("LOW", ["low threat"])
+
+        activated = responder.evaluate_auto_protection(80.0, wifi_report=report)
+
+        self.assertTrue(activated)
+        mock_alert.assert_called_once()
+        mock_vpn.assert_called_once_with(state=True)
+        mock_dns.assert_called_once()
+
+        activated_again = responder.evaluate_auto_protection(
+            82.0, wifi_report=report,
+        )
+        self.assertFalse(activated_again)
+        mock_vpn.assert_called_once()
+        mock_dns.assert_called_once()
+
+    @patch("modules.wifi_responder.subprocess.run")
+    def test_apply_hardened_dns_linux_uses_resolvectl(self, mock_run):
+        from modules.wifi_responder import WiFiResponder
+
+        mock_run.side_effect = [
+            MagicMock(
+                returncode=0,
+                stdout="default via 192.168.1.1 dev wlan0 proto dhcp src 192.168.1.50\n",
+            ),
+            MagicMock(returncode=0),
+        ]
+
+        responder = WiFiResponder()
+        responder._os = "Linux"
+        responder._apply_hardened_dns()
+
+        self.assertGreaterEqual(mock_run.call_count, 2)
+        cmd = mock_run.call_args_list[-1].args[0]
+        self.assertIn("resolvectl", cmd)
+
+    @patch("modules.wifi_responder.subprocess.run")
+    def test_apply_hardened_dns_windows_uses_netsh(self, mock_run):
+        from modules.wifi_responder import WiFiResponder
+
+        mock_run.return_value = MagicMock(returncode=0)
+
+        responder = WiFiResponder()
+        responder._os = "Windows"
+        responder._apply_hardened_dns()
+
+        self.assertGreaterEqual(mock_run.call_count, 2)
+        first_cmd = mock_run.call_args_list[0].args[0]
+        self.assertIn("netsh", first_cmd)
 
     def test_log_incident_creates_file(self):
         """log_incident should write a JSONL entry."""

@@ -219,7 +219,8 @@ def table_row(parent, cells):
     t = _t()
     fr = HoverRow(parent)
     lay = QHBoxLayout(fr)
-    lay.setContentsMargins(22, 8, 22, 8)
+    # Increase vertical padding to make rows taller (improves Nearby Networks)
+    lay.setContentsMargins(22, 14, 22, 14)
     lay.setSpacing(5)
 
     for item in cells:
@@ -343,6 +344,47 @@ def mini_stat(parent, icon, value, label):
     lbl.setStyleSheet(f"color: {t['text_muted']};")
     layout.addWidget(lbl)
     return f
+
+
+class MiniStat(GlassFrame):
+    """Small icon + value + label card with runtime update API."""
+    def __init__(self, parent, icon, value="--", label=""):
+        super().__init__(parent)
+        t = _t()
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(18, 18, 18, 18)
+        self._layout.setSpacing(4)
+
+        self._icon_lbl = QLabel(icon)
+        self._icon_lbl.setFont(QFont("Segoe UI", 16))
+        self._icon_lbl.setStyleSheet(f"color: {t['text_secondary']};")
+        self._layout.addWidget(self._icon_lbl)
+
+        self._val_lbl = QLabel(str(value))
+        self._val_lbl.setFont(QFont("Segoe UI", 22, QFont.Weight.Bold))
+        self._val_lbl.setStyleSheet(f"color: {t['text_primary']};")
+        self._layout.addWidget(self._val_lbl)
+
+        self._label = QLabel(label.upper())
+        self._label.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        self._label.setStyleSheet(f"color: {t['text_muted']};")
+        self._layout.addWidget(self._label)
+
+    def update_value(self, value: str) -> None:
+        """Update the displayed value (string)."""
+        self._val_lbl.setText(str(value))
+
+    def set_visible(self, visible: bool) -> None:
+        """Show or hide the entire mini-stat card."""
+        if visible:
+            self.show()
+        else:
+            self.hide()
+
+
+def mini_stat(parent, icon, value, label):
+    """Factory kept for backward compatibility; returns `MiniStat`."""
+    return MiniStat(parent, icon, value, label)
 
 
 # ═══════════════════════════════════════════════════════════════════════

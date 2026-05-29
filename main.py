@@ -32,10 +32,12 @@ def monitor_loop(data_bridge: DataBridge):
     from modules.web_tracker import WebTrackerMonitor
     from modules.threat_scoring import ThreatScorer
     from modules.auto_responder import AutoResponder
+    from modules.wifi_responder import WiFiResponder
 
     analyzer = WiFiAnalyzer()
     scorer = ThreatScorer()
     responder = AutoResponder()
+    wifi_responder = WiFiResponder()
     profiler = BehavioralProfiler()
     web_monitor = WebTrackerMonitor()
 
@@ -69,18 +71,41 @@ def monitor_loop(data_bridge: DataBridge):
 
             # ── Push to DataBridge (thread-safe) ──
             data_bridge.push(score)
-            data_bridge.set_reports(
+
+            # Evaluate auto-responder and capture fired actions so the UI
+            # can display a count of automated responses.
+            fired_actions = responder.evaluate(
+                score,
                 wifi_report=wifi_report,
                 behavioral_report=behavioral_report,
                 web_report=web_report,
             )
 
-            # ── Auto-responder (alerts, logging) ──
-            responder.evaluate(
-                score,
+            # Ask AutoResponder for UI-friendly recommended actions
+            try:
+                recommended = responder.recommend(
+                    score,
+                    wifi_report=wifi_report,
+                    behavioral_report=behavioral_report,
+                    web_report=web_report,
+                )
+            except Exception:
+                recommended = []
+
+            data_bridge.set_reports(
                 wifi_report=wifi_report,
                 behavioral_report=behavioral_report,
                 web_report=web_report,
+                actions_taken=(len(fired_actions) if fired_actions is not None else 0),
+                recommended_actions=recommended,
+            )
+
+            # ── Auto network protection (VPN + hardened DNS) ──
+            if wifi_report.severity in ("HIGH", "CRITICAL"):
+                wifi_responder.on_threshold_breach(wifi_report)
+            wifi_responder.evaluate_auto_protection(
+                score.unified_score,
+                wifi_report=wifi_report,
             )
 
         except Exception as exc:

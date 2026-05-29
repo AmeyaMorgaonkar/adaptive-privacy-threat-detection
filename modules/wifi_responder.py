@@ -40,6 +40,7 @@ class WiFiResponder:
 
     def __init__(self) -> None:
         self._os = platform.system()
+        self._network_protection_enabled = False
         config.DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     # ── Main entry point ─────────────────────────────────────────────
@@ -70,18 +71,60 @@ class WiFiResponder:
 
         # VPN
         if report.severity in ("HIGH", "CRITICAL"):
-            self.toggle_vpn(state=True)
-
-        # DNS hardening
-        if (
-            config.AUTO_ENABLE_DNS_PROTECTION
-            and report.severity in ("HIGH", "CRITICAL")
-        ):
-            self._apply_hardened_dns()
+            self._enable_network_protection(
+                reason=f"Wi-Fi severity {report.severity}",
+            )
 
         # Disconnect (safety-off by default)
         if report.severity == "CRITICAL" and config.AUTO_DISCONNECT_ON_ROGUE:
             self.disconnect_network()
+
+    def evaluate_auto_protection(
+        self,
+        unified_score: float,
+        wifi_report: WiFiReport | None = None,
+    ) -> bool:
+        """Enable VPN/DNS hardening from the unified threat score.
+
+        Returns True when this call transitions the responder into the
+        protected state. Subsequent calls while protection remains active
+        are ignored to avoid repeatedly restarting VPN/DNS commands.
+        """
+        threshold = getattr(
+            config,
+            "AUTO_PROTECTION_THREAT_SCORE_THRESHOLD",
+            75,
+        )
+        wifi_triggered = (
+            wifi_report is not None
+            and wifi_report.severity in ("HIGH", "CRITICAL")
+        )
+        score_triggered = unified_score >= threshold
+
+        if not (wifi_triggered or score_triggered):
+            return False
+
+        if self._network_protection_enabled:
+            log.debug(
+                "Network protection already active; skipping (score=%.2f, wifi=%s)",
+                unified_score,
+                getattr(wifi_report, "severity", "n/a"),
+            )
+            return False
+
+        reasons = []
+        if score_triggered:
+            reasons.append(f"unified score {unified_score:.2f}/{threshold}")
+        if wifi_triggered:
+            reasons.append(f"Wi-Fi severity {wifi_report.severity}")
+
+        self.alert_user(
+            "Automatic network protection enabled ("
+            + ", ".join(reasons)
+            + ")."
+        )
+        self._enable_network_protection(reason="; ".join(reasons))
+        return True
 
     def planned_actions(self, report: WiFiReport) -> list[str]:
         """Return which actions would run for the given report."""
@@ -228,6 +271,10 @@ class WiFiResponder:
                             creationflags=subprocess.CREATE_NO_WINDOW,
                         )
                 log.info("Hardened DNS applied on Windows")
+            elif self._os == "Linux":
+                self._apply_hardened_dns_linux(dns_servers)
+            elif self._os == "Darwin":
+                self._apply_hardened_dns_macos(dns_servers)
             else:
                 log.info(
                     "Hardened DNS auto-apply not implemented for %s — "
@@ -236,6 +283,96 @@ class WiFiResponder:
                 )
         except Exception as exc:
             log.error("DNS hardening failed: %s", exc)
+
+    def _apply_hardened_dns_linux(self, dns_servers: list[str]) -> None:
+        """Best-effort hardened DNS setup for Linux."""
+        dns_args = dns_servers[:2]
+        iface = self._get_linux_default_interface()
+        if not iface:
+            log.info(
+                "Hardened DNS auto-apply not fully implemented for Linux — "
+                "manual setup recommended"
+            )
+            return
+
+        try:
+            result = subprocess.run(
+                ["resolvectl", "dns", iface, *dns_args],
+                capture_output=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                log.info("Hardened DNS applied on Linux via resolvectl (%s)", iface)
+                return
+        except FileNotFoundError:
+            log.debug("resolvectl not available on Linux")
+        except subprocess.TimeoutExpired:
+            log.error("Linux DNS hardening timed out via resolvectl")
+            return
+
+        log.info(
+            "Hardened DNS auto-apply not fully implemented for Linux — "
+            "manual setup recommended"
+        )
+
+    def _get_linux_default_interface(self) -> str:
+        """Return the default-route interface on Linux, if available."""
+        try:
+            result = subprocess.run(
+                ["ip", "route", "show", "default"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                return ""
+
+            tokens = result.stdout.split()
+            if "dev" in tokens:
+                dev_index = tokens.index("dev")
+                if dev_index + 1 < len(tokens):
+                    return tokens[dev_index + 1]
+        except FileNotFoundError:
+            log.debug("ip command not available on Linux")
+        except subprocess.TimeoutExpired:
+            log.error("Linux interface lookup timed out")
+        except Exception as exc:
+            log.debug("Linux interface lookup failed: %s", exc)
+
+        return ""
+
+    def _apply_hardened_dns_macos(self, dns_servers: list[str]) -> None:
+        """Best-effort hardened DNS setup for macOS."""
+        iface = "Wi-Fi"
+        try:
+            subprocess.run(
+                ["networksetup", "-setdnsservers", iface, *dns_servers[:2]],
+                capture_output=True,
+                timeout=10,
+            )
+            log.info("Hardened DNS applied on macOS")
+        except FileNotFoundError:
+            log.debug("networksetup not available on macOS")
+            log.info(
+                "Hardened DNS auto-apply not fully implemented for macOS — "
+                "manual setup recommended"
+            )
+        except subprocess.TimeoutExpired:
+            log.error("macOS DNS hardening timed out")
+        except Exception as exc:
+            log.error("macOS DNS hardening failed: %s", exc)
+
+    def _enable_network_protection(self, reason: str) -> None:
+        """Turn on VPN and DNS hardening once per session."""
+        if self._network_protection_enabled:
+            log.debug("Network protection already enabled; skipping (%s)", reason)
+            return
+
+        log.warning("Enabling network protection: %s", reason)
+        self.toggle_vpn(state=True)
+        if config.AUTO_ENABLE_DNS_PROTECTION:
+            self._apply_hardened_dns()
+        self._network_protection_enabled = True
 
 
 def _demo_preview_or_execute() -> None:

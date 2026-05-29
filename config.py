@@ -46,6 +46,7 @@ TIER_HIGH_MAX = 89
 DASHBOARD_REFRESH_MS = 1000           # UI poll interval (ms)
 MONITOR_INTERVAL_SECONDS = SCAN_INTERVAL_SECONDS  # Background scan interval
 SCORE_HISTORY_LENGTH = 300            # ~5 minutes at 1s intervals
+AUTO_PROTECTION_THREAT_SCORE_THRESHOLD = 75  # Start VPN/DNS hardening at this score
 
 # Response cooldowns (seconds) — per-action deduplication windows
 RESPONSE_COOLDOWNS = {

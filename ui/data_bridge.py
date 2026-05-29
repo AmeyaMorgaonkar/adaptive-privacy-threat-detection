@@ -175,6 +175,19 @@ class DataBridge:
         with self._reports_lock:
             self._reports.update(reports)
 
+        # Quick debug: log number of nearby networks when a WiFiReport is set
+        try:
+            wifi = reports.get("wifi_report")
+            if wifi is not None:
+                # wifi may be a dataclass or dict
+                if isinstance(wifi, dict):
+                    nn = len(wifi.get("nearby_networks", []))
+                else:
+                    nn = len(getattr(wifi, "nearby_networks", []))
+                log.debug("DataBridge.set_reports — wifi_report nearby_networks=%d", nn)
+        except Exception:
+            pass
+
     def get_reports(self) -> dict:
         """Return a snapshot of the latest module reports."""
         with self._reports_lock:
