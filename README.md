@@ -32,7 +32,7 @@ Built with **PySide6** for the desktop UI, **Python 3.10+** for all analysis mod
 
 ```bash
 # Clone the repository
-git clone <repo-url>
+git clone https://github.com/AmeyaMorgaonkar/adaptive-privacy-threat-detection
 cd "Adaptive Privacy & Threat Detection System"
 
 # Create a virtual environment
