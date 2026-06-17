@@ -41,6 +41,9 @@ def monitor_loop(data_bridge: DataBridge):
     profiler = BehavioralProfiler()
     web_monitor = WebTrackerMonitor()
 
+    # Register WiFiResponder with DataBridge for UI-driven VPN toggle
+    data_bridge.set_wifi_responder(wifi_responder)
+
     interval = getattr(config, "MONITOR_INTERVAL_SECONDS",
                        config.SCAN_INTERVAL_SECONDS)
 

@@ -62,6 +62,10 @@ class DataBridge:
         self._session_running: bool = True
         self._session_lock = threading.Lock()
 
+        # WiFiResponder reference for UI-driven VPN toggle
+        self._wifi_responder = None
+        self._wifi_responder_lock = threading.Lock()
+
     # ── Producer API (called from background threads) ────────────────
 
     def push(self, score: ThreatScore) -> None:
@@ -246,3 +250,33 @@ class DataBridge:
                 self._session_start = datetime.now(timezone.utc).isoformat()
             self._session_running = True
         log.info("Session started/resumed")
+
+    # ── VPN control (Milestone — UI toggle) ──────────────────────────
+
+    def set_wifi_responder(self, responder) -> None:
+        """Store a reference to the WiFiResponder for UI-driven VPN control."""
+        with self._wifi_responder_lock:
+            self._wifi_responder = responder
+
+    def is_vpn_active(self) -> bool:
+        """Query the WiFiResponder for current VPN state."""
+        with self._wifi_responder_lock:
+            if self._wifi_responder is None:
+                return False
+            return self._wifi_responder.is_vpn_active
+
+    def set_vpn_state(self, enabled: bool) -> None:
+        """Toggle VPN on/off from the UI.
+
+        Runs in the calling thread (UI).  The actual subprocess work is
+        fast (sends a signal / launches a process), so it's acceptable.
+        """
+        with self._wifi_responder_lock:
+            if self._wifi_responder is None:
+                log.warning("Cannot toggle VPN — WiFiResponder not available")
+                return
+            if enabled:
+                self._wifi_responder.manual_enable_vpn()
+            else:
+                self._wifi_responder.disable_network_protection()
+        log.info("VPN toggled via UI: %s", "ON" if enabled else "OFF")

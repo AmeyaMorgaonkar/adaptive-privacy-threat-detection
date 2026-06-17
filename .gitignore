@@ -43,3 +43,6 @@ data/*.jsonl
 
 # Distribution
 *.spec
+
+# Assets
+assets/

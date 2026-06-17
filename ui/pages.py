@@ -106,6 +106,41 @@ class DashboardPage(QWidget):
             r1g.setColumnStretch(c, 1)
         lay.addWidget(r1)
 
+        # ── VPN Protection Toggle ──
+        vpn_row = QWidget()
+        vpn_rl = QHBoxLayout(vpn_row)
+        vpn_rl.setContentsMargins(0, 0, 0, 15)
+        vpn_rl.setSpacing(0)
+
+        vpn_card = GlassFrame(vpn_row)
+        vpn_lay = QHBoxLayout(vpn_card)
+        vpn_lay.setContentsMargins(22, 16, 22, 16)
+        vpn_lay.setSpacing(14)
+
+        vpn_icon = QLabel("🛡️")
+        vpn_icon.setFont(QFont("Segoe UI", 20))
+        vpn_lay.addWidget(vpn_icon)
+
+        vpn_text = QVBoxLayout()
+        vpn_text.setSpacing(2)
+        vpn_title = QLabel("VPN Protection")
+        vpn_title.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
+        vpn_title.setStyleSheet(f"color: {t['text_primary']};")
+        vpn_text.addWidget(vpn_title)
+        self._vpn_status_lbl = QLabel("Inactive")
+        self._vpn_status_lbl.setFont(QFont("Segoe UI", 10))
+        self._vpn_status_lbl.setStyleSheet(f"color: {t['text_secondary']};")
+        vpn_text.addWidget(self._vpn_status_lbl)
+        vpn_lay.addLayout(vpn_text)
+        vpn_lay.addStretch()
+
+        self._vpn_toggle = ToggleSwitch(vpn_card, checked=False)
+        self._vpn_toggle.toggled.connect(self._on_vpn_toggle)
+        vpn_lay.addWidget(self._vpn_toggle)
+
+        vpn_rl.addWidget(vpn_card)
+        lay.addWidget(vpn_row)
+
         # ── Row 2: Module scores + Actions ──
         r2 = QWidget()
         r2g = QGridLayout(r2)
@@ -192,6 +227,21 @@ class DashboardPage(QWidget):
         lay.addWidget(r3)
         lay.addStretch()
 
+    # ── VPN toggle handler ──
+
+    def _on_vpn_toggle(self, checked: bool):
+        """Called when the user clicks the VPN toggle switch."""
+        t = _t()
+        if checked:
+            self._vpn_status_lbl.setText("Connecting…")
+            self._vpn_status_lbl.setStyleSheet(f"color: {t['warning']};")
+        else:
+            self._vpn_status_lbl.setText("Disconnecting…")
+            self._vpn_status_lbl.setStyleSheet(f"color: {t['warning']};")
+        # Dispatch to DataBridge → WiFiResponder
+        if self.data_bridge:
+            self.data_bridge.set_vpn_state(checked)
+
     # ── Live data refresh (called by App.on_refresh) ──
 
     def refresh(self, score):
@@ -210,6 +260,24 @@ class DashboardPage(QWidget):
             _t()["danger"] if n else _t()["accent"])
 
         self.scan_card.update_value("Just now")
+
+        # ── Sync VPN toggle with backend state ──
+        try:
+            vpn_active = self.data_bridge.is_vpn_active() if self.data_bridge else False
+            t = _t()
+            # Only update toggle if it doesn't match (avoid signal loops)
+            if self._vpn_toggle.isChecked() != vpn_active:
+                self._vpn_toggle.blockSignals(True)
+                self._vpn_toggle.setChecked(vpn_active)
+                self._vpn_toggle.blockSignals(False)
+            if vpn_active:
+                self._vpn_status_lbl.setText("Active — Protected")
+                self._vpn_status_lbl.setStyleSheet(f"color: {t['accent']};")
+            else:
+                self._vpn_status_lbl.setText("Inactive")
+                self._vpn_status_lbl.setStyleSheet(f"color: {t['text_secondary']};")
+        except Exception:
+            pass
 
         # ── Live module reports (used for mini-stats and recommended actions)
         reports = {}

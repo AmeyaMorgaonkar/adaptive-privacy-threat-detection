@@ -25,7 +25,10 @@ EVIL_TWIN_RSSI_DELTA = 10             # dBm difference to flag twin
 SUSPICIOUS_SIGNAL_THRESHOLD_DBM = -30 # Sudden RSSI spike from unknown AP
 MAX_ALLOWED_OPEN_NETWORKS = 3         # Max open networks before alert
 AUTO_DISCONNECT_ON_ROGUE = False      # Safety off by default
-VPN_CONFIG_PATH = "configs/client.ovpn"
+VPN_CONFIG_DIR = BASE_DIR / "assets"        # Directory containing .ovpn files
+VPN_CONFIG_PATH = VPN_CONFIG_DIR             # Legacy alias (now a directory)
+VPN_AUTH_FILE = VPN_CONFIG_DIR / "credentials.txt"  # username\npassword for auth-user-pass
+OPENVPN_BINARY = r"C:\Program Files\OpenVPN\bin\openvpn.exe"
 HARDENED_DNS_SERVERS = ["1.1.1.1", "8.8.8.8"]
 AUTO_ENABLE_DNS_PROTECTION = True
 
@@ -46,7 +49,7 @@ TIER_HIGH_MAX = 89
 DASHBOARD_REFRESH_MS = 1000           # UI poll interval (ms)
 MONITOR_INTERVAL_SECONDS = SCAN_INTERVAL_SECONDS  # Background scan interval
 SCORE_HISTORY_LENGTH = 300            # ~5 minutes at 1s intervals
-AUTO_PROTECTION_THREAT_SCORE_THRESHOLD = 75  # Start VPN/DNS hardening at this score
+AUTO_PROTECTION_THREAT_SCORE_THRESHOLD = 50  # Start VPN/DNS hardening at this score
 
 # Response cooldowns (seconds) — per-action deduplication windows
 RESPONSE_COOLDOWNS = {
