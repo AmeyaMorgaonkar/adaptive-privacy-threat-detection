@@ -183,14 +183,14 @@ class Header(QFrame):
 class App(QMainWindow):
     """Main application window."""
 
-    def __init__(self, data_bridge: DataBridge):
+    def __init__(self, data_bridge: DataBridge, config_manager: ConfigManager = None):
         super().__init__()
         self.setWindowTitle("Sentinel Dashboard")
         self.resize(1440, 950)
         self.setMinimumSize(1100, 768)
 
         self.data_bridge = data_bridge
-        self.config_manager = ConfigManager()
+        self.config_manager = config_manager or ConfigManager()
         self._current_page = "Dashboard"
 
         # Apply initial theme
@@ -354,9 +354,9 @@ class App(QMainWindow):
         self.show_page(current)
 
 
-def run(data_bridge: DataBridge):
+def run(data_bridge: DataBridge, config_manager: ConfigManager = None):
     """Launch the PySide6 application."""
     app = QApplication(sys.argv)
-    window = App(data_bridge)
+    window = App(data_bridge, config_manager=config_manager)
     window.show()
     sys.exit(app.exec())

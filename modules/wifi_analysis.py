@@ -72,6 +72,7 @@ class WiFiAnalyzer:
     def __init__(self) -> None:
         self._os = platform.system()  # Windows / Linux / Darwin
         self._signal_history: list[int] = []
+        self._last_scan_results: list[dict] = []  # cache for retry logic
 
     # ── Public API ───────────────────────────────────────────────────
 
@@ -350,7 +351,18 @@ class WiFiAnalyzer:
     # ── Windows Scanning ─────────────────────────────────────────────
 
     def _scan_windows(self) -> list[dict]:
-        """Parse `netsh wlan show networks mode=bssid`."""
+        """Parse `netsh wlan show networks mode=bssid`.
+
+        Triggers a fresh hardware scan via the WlanScan API first so
+        that netsh returns up-to-date results instead of a stale cache
+        that may only contain the connected network.
+        """
+        # Trigger a fresh scan so the cache is updated
+        scan_triggered = self._trigger_wlan_scan_windows()
+        if scan_triggered:
+            # Give the adapter time to complete the scan
+            time.sleep(2)
+
         try:
             result = subprocess.run(
                 ["netsh", "wlan", "show", "networks", "mode=bssid"],
@@ -359,7 +371,42 @@ class WiFiAnalyzer:
                 timeout=15,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
-            return self._parse_netsh_scan(result.stdout)
+            networks = self._parse_netsh_scan(result.stdout)
+
+            # If results are suspiciously sparse, retry once after a
+            # short wait — the WlanScan may not have finished yet.
+            if len(networks) <= 1 and scan_triggered:
+                log.debug(
+                    "Only %d network(s) found after WlanScan, retrying…",
+                    len(networks),
+                )
+                time.sleep(2)
+                result = subprocess.run(
+                    ["netsh", "wlan", "show", "networks", "mode=bssid"],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                retry_networks = self._parse_netsh_scan(result.stdout)
+                if len(retry_networks) > len(networks):
+                    networks = retry_networks
+
+            # Merge with last scan's results to avoid flicker when the
+            # cache temporarily drops networks between scans
+            if len(networks) > len(self._last_scan_results):
+                self._last_scan_results = networks
+            elif len(networks) <= 1 and self._last_scan_results:
+                log.debug(
+                    "Using cached scan results (%d networks) "
+                    "instead of sparse fresh scan (%d)",
+                    len(self._last_scan_results), len(networks),
+                )
+                networks = self._last_scan_results
+            else:
+                self._last_scan_results = networks
+
+            return networks
         except FileNotFoundError:
             log.error("netsh not found — is this a Windows system?")
             return []
@@ -369,6 +416,100 @@ class WiFiAnalyzer:
         except Exception as exc:
             log.error("Windows scan failed: %s", exc)
             return []
+
+    def _trigger_wlan_scan_windows(self) -> bool:
+        """Trigger a fresh Wi-Fi scan via the Windows Native WiFi API.
+
+        Calls ``WlanScan`` from ``wlanapi.dll`` to instruct the adapter
+        to perform an active scan.  The subsequent ``netsh`` query will
+        then return fresh results instead of a stale cache.
+
+        Returns True if the scan was triggered successfully.
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            wlanapi = ctypes.windll.wlanapi  # type: ignore[attr-defined]
+
+            # -- WlanOpenHandle ------------------------------------------------
+            handle = wintypes.HANDLE()
+            negotiated = wintypes.DWORD()
+            ret = wlanapi.WlanOpenHandle(
+                wintypes.DWORD(2), None,
+                ctypes.byref(negotiated), ctypes.byref(handle),
+            )
+            if ret != 0:
+                if ret == 5:  # ERROR_ACCESS_DENIED
+                    log.debug(
+                        "WlanOpenHandle access denied — precise location "
+                        "may be turned off; using cached scan results"
+                    )
+                else:
+                    log.debug("WlanOpenHandle failed (code %d)", ret)
+                return False
+
+            try:
+                # -- GUID structure -------------------------------------------
+                class GUID(ctypes.Structure):
+                    _fields_ = [
+                        ("Data1", wintypes.DWORD),
+                        ("Data2", wintypes.WORD),
+                        ("Data3", wintypes.WORD),
+                        ("Data4", ctypes.c_byte * 8),
+                    ]
+
+                class WLAN_INTERFACE_INFO(ctypes.Structure):
+                    _fields_ = [
+                        ("InterfaceGuid", GUID),
+                        ("strInterfaceDescription", ctypes.c_wchar * 256),
+                        ("isState", wintypes.DWORD),
+                    ]
+
+                class WLAN_INTERFACE_INFO_LIST(ctypes.Structure):
+                    _fields_ = [
+                        ("dwNumberOfItems", wintypes.DWORD),
+                        ("dwIndex", wintypes.DWORD),
+                        ("InterfaceInfo", WLAN_INTERFACE_INFO * 1),
+                    ]
+
+                # -- WlanEnumInterfaces ----------------------------------------
+                iface_ptr = ctypes.POINTER(WLAN_INTERFACE_INFO_LIST)()
+                ret = wlanapi.WlanEnumInterfaces(
+                    handle, None, ctypes.byref(iface_ptr),
+                )
+                if ret != 0 or iface_ptr.contents.dwNumberOfItems == 0:
+                    log.debug("WlanEnumInterfaces: no WiFi adapters (code %d)", ret)
+                    return False
+
+                iface_guid = iface_ptr.contents.InterfaceInfo[0].InterfaceGuid
+
+                # -- WlanScan --------------------------------------------------
+                ret = wlanapi.WlanScan(
+                    handle, ctypes.byref(iface_guid), None, None, None,
+                )
+                wlanapi.WlanFreeMemory(iface_ptr)
+
+                if ret != 0:
+                    if ret == 5:  # ERROR_ACCESS_DENIED
+                        log.debug(
+                            "WlanScan access denied — Windows precise location "
+                            "is likely turned off; falling back to cached results"
+                        )
+                    else:
+                        log.debug("WlanScan call failed (code %d)", ret)
+                    return False
+
+                log.debug("WlanScan triggered successfully")
+                return True
+            finally:
+                wlanapi.WlanCloseHandle(handle, None)
+        except Exception as exc:
+            log.debug(
+                "WlanScan trigger unavailable (%s) — using cached scan results",
+                exc,
+            )
+            return False
 
     def _connected_windows(self) -> dict:
         """Parse `netsh wlan show interfaces` for the active connection."""

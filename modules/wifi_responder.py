@@ -39,12 +39,24 @@ INCIDENT_LOG = config.DATA_DIR / "wifi_incidents.jsonl"
 class WiFiResponder:
     """Reacts to threshold breaches reported by WiFiAnalyzer."""
 
-    def __init__(self) -> None:
+    def __init__(self, config_manager=None) -> None:
         self._os = platform.system()
         self._network_protection_enabled = False
         self._manual_override = False
         self._vpn_process: subprocess.Popen | None = None
         config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+        # DNS management via the shared DNSManager
+        from modules.dns_manager import DNSManager
+        self._dns_manager = DNSManager(config_manager=config_manager)
+
+        # Detect and adopt any orphaned OpenVPN process from a previous run
+        self._detect_existing_vpn()
+
+    @property
+    def dns_manager(self):
+        """Expose the DNSManager for UI-driven DNS switching."""
+        return self._dns_manager
 
     # ── Main entry point ─────────────────────────────────────────────
 
@@ -209,6 +221,9 @@ class WiFiResponder:
             if self._os == "Windows":
                 self._toggle_windows_builtin_vpn(state=False)
             return
+
+        # ── Kill any stale OpenVPN process before starting a new one ──
+        self._kill_stale_openvpn()
 
         # ── Start: discover .ovpn configs ─────────────────────────────
         vpn_dir = Path(getattr(config, "VPN_CONFIG_DIR", "assets"))
@@ -433,126 +448,14 @@ class WiFiResponder:
     # ── Internal helpers ─────────────────────────────────────────────
 
     def _apply_hardened_dns(self) -> None:
-        """Apply hardened DNS servers from config (best-effort)."""
-        dns_servers = config.HARDENED_DNS_SERVERS
-        log.info("Applying hardened DNS: %s", dns_servers)
+        """Apply encrypted DNS via the DNSManager.
 
-        try:
-            if self._os == "Windows":
-                # Set primary DNS on the active Wi-Fi adapter
-                iface = "Wi-Fi"
-                for i, dns in enumerate(dns_servers[:2]):
-                    if i == 0:
-                        subprocess.run(
-                            [
-                                "netsh", "interface", "ip", "set", "dns",
-                                f"name={iface}", "static", dns,
-                            ],
-                            capture_output=True,
-                            timeout=10,
-                            creationflags=subprocess.CREATE_NO_WINDOW,
-                        )
-                    else:
-                        subprocess.run(
-                            [
-                                "netsh", "interface", "ip", "add", "dns",
-                                f"name={iface}", dns, "index=2",
-                            ],
-                            capture_output=True,
-                            timeout=10,
-                            creationflags=subprocess.CREATE_NO_WINDOW,
-                        )
-                log.info("Hardened DNS applied on Windows")
-            elif self._os == "Linux":
-                self._apply_hardened_dns_linux(dns_servers)
-            elif self._os == "Darwin":
-                self._apply_hardened_dns_macos(dns_servers)
-            else:
-                log.info(
-                    "Hardened DNS auto-apply not implemented for %s — "
-                    "manual setup recommended",
-                    self._os,
-                )
-        except Exception as exc:
-            log.error("DNS hardening failed: %s", exc)
-
-    def _apply_hardened_dns_linux(self, dns_servers: list[str]) -> None:
-        """Best-effort hardened DNS setup for Linux."""
-        dns_args = dns_servers[:2]
-        iface = self._get_linux_default_interface()
-        if not iface:
-            log.info(
-                "Hardened DNS auto-apply not fully implemented for Linux — "
-                "manual setup recommended"
-            )
-            return
-
-        try:
-            result = subprocess.run(
-                ["resolvectl", "dns", iface, *dns_args],
-                capture_output=True,
-                timeout=10,
-            )
-            if result.returncode == 0:
-                log.info("Hardened DNS applied on Linux via resolvectl (%s)", iface)
-                return
-        except FileNotFoundError:
-            log.debug("resolvectl not available on Linux")
-        except subprocess.TimeoutExpired:
-            log.error("Linux DNS hardening timed out via resolvectl")
-            return
-
-        log.info(
-            "Hardened DNS auto-apply not fully implemented for Linux — "
-            "manual setup recommended"
-        )
-
-    def _get_linux_default_interface(self) -> str:
-        """Return the default-route interface on Linux, if available."""
-        try:
-            result = subprocess.run(
-                ["ip", "route", "show", "default"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if result.returncode != 0:
-                return ""
-
-            tokens = result.stdout.split()
-            if "dev" in tokens:
-                dev_index = tokens.index("dev")
-                if dev_index + 1 < len(tokens):
-                    return tokens[dev_index + 1]
-        except FileNotFoundError:
-            log.debug("ip command not available on Linux")
-        except subprocess.TimeoutExpired:
-            log.error("Linux interface lookup timed out")
-        except Exception as exc:
-            log.debug("Linux interface lookup failed: %s", exc)
-
-        return ""
-
-    def _apply_hardened_dns_macos(self, dns_servers: list[str]) -> None:
-        """Best-effort hardened DNS setup for macOS."""
-        iface = "Wi-Fi"
-        try:
-            subprocess.run(
-                ["networksetup", "-setdnsservers", iface, *dns_servers[:2]],
-                capture_output=True,
-                timeout=10,
-            )
-            log.info("Hardened DNS applied on macOS")
-        except FileNotFoundError:
-            log.debug("networksetup not available on macOS")
-            log.info(
-                "Hardened DNS auto-apply not fully implemented for macOS — "
-                "manual setup recommended"
-            )
-        except subprocess.TimeoutExpired:
-            log.error("macOS DNS hardening timed out")
-        except Exception as exc:
-            log.error("macOS DNS hardening failed: %s", exc)
+        Delegates to DNSManager.switch_provider() using the configured
+        DEFAULT_DNS_PROVIDER.  All platform logic, DoH registration,
+        and DNS cache flushing are handled by DNSManager.
+        """
+        provider = getattr(config, "DEFAULT_DNS_PROVIDER", "Cloudflare")
+        self._dns_manager.switch_provider(provider)
 
     def _enable_network_protection(self, reason: str) -> None:
         """Turn on VPN and DNS hardening once per session."""
@@ -604,11 +507,15 @@ class WiFiResponder:
     @property
     def is_vpn_active(self) -> bool:
         """Return True when the VPN is believed to be running."""
+        # Check our own child process first
+        if self._vpn_process is not None and self._vpn_process.poll() is None:
+            return True
+        # Also check for an orphaned system-level openvpn process
+        # (e.g. from a previous app run that didn't clean up)
+        if self._is_openvpn_running_system():
+            return True
         if not self._network_protection_enabled:
             return False
-        # Double-check the process is actually alive
-        if self._vpn_process is not None:
-            return self._vpn_process.poll() is None
         # Protection was enabled via built-in VPN (no process handle)
         return True
 
@@ -616,6 +523,69 @@ class WiFiResponder:
         """Enable VPN regardless of threat score (user-initiated)."""
         self._manual_override = False
         self._enable_network_protection(reason="Manual user toggle")
+
+    # ── Stale / orphan VPN management ────────────────────────────────
+
+    @staticmethod
+    def _is_openvpn_running_system() -> bool:
+        """Check if any openvpn process exists on the system."""
+        try:
+            import psutil
+            for proc in psutil.process_iter(['name']):
+                if (proc.info['name'] or '').lower() in ('openvpn.exe', 'openvpn'):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _detect_existing_vpn(self) -> None:
+        """On startup, check if OpenVPN is already running from a previous
+        app session and adopt that state so the UI reflects reality."""
+        if self._is_openvpn_running_system():
+            log.info(
+                "Detected existing OpenVPN process from a previous session — "
+                "adopting VPN-active state"
+            )
+            self._network_protection_enabled = True
+            # We don't have a Popen handle, but is_vpn_active will
+            # detect the system process via _is_openvpn_running_system()
+
+    def _kill_stale_openvpn(self) -> None:
+        """Kill any existing openvpn process before starting a fresh one.
+
+        This prevents conflicts when the TUN adapter or port is still held
+        by an orphaned process from a previous app run.
+        """
+        # Kill our own child process if we have one
+        if self._vpn_process is not None and self._vpn_process.poll() is None:
+            try:
+                self._vpn_process.terminate()
+                self._vpn_process.wait(timeout=5)
+                log.info("Terminated existing child VPN process (pid=%d)",
+                         self._vpn_process.pid)
+            except Exception as exc:
+                log.warning("Failed to terminate child VPN process: %s", exc)
+            self._vpn_process = None
+
+        # Also kill any system-level openvpn process we don't own
+        if self._is_openvpn_running_system():
+            log.info("Killing stale system openvpn process before starting fresh")
+            try:
+                if self._os == "Windows":
+                    subprocess.run(
+                        ["taskkill", "/IM", "openvpn.exe", "/F"],
+                        capture_output=True, timeout=10,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
+                else:
+                    subprocess.run(
+                        ["killall", "openvpn"],
+                        capture_output=True, timeout=10,
+                    )
+                # Brief wait for TUN adapter to release
+                time.sleep(1)
+            except Exception as exc:
+                log.warning("Failed to kill stale openvpn: %s", exc)
 
 
 def _demo_preview_or_execute() -> None:

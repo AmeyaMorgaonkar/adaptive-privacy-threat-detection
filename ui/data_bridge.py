@@ -280,3 +280,51 @@ class DataBridge:
             else:
                 self._wifi_responder.disable_network_protection()
         log.info("VPN toggled via UI: %s", "ON" if enabled else "OFF")
+
+    # ── DNS control (Encrypted DNS switching) ────────────────────────
+
+    def get_dns_providers(self) -> dict:
+        """Return the available encrypted DNS providers."""
+        return dict(config.ENCRYPTED_DNS_PROVIDERS)
+
+    def get_active_dns_provider(self) -> str:
+        """Return the name of the currently active DNS provider."""
+        with self._wifi_responder_lock:
+            if self._wifi_responder is None:
+                return "System Default"
+            try:
+                return self._wifi_responder.dns_manager.active_provider
+            except Exception:
+                return "System Default"
+
+    def switch_dns_provider(self, provider_name: str) -> bool:
+        """Switch to a named encrypted DNS provider from the UI.
+
+        Returns True on success.
+        """
+        with self._wifi_responder_lock:
+            if self._wifi_responder is None:
+                log.warning("Cannot switch DNS — WiFiResponder not available")
+                return False
+            try:
+                result = self._wifi_responder.dns_manager.switch_provider(provider_name)
+                log.info("DNS switched via UI: %s (success=%s)", provider_name, result)
+                return result
+            except Exception as exc:
+                log.error("DNS switch via UI failed: %s", exc)
+                return False
+
+    def restore_default_dns(self) -> bool:
+        """Restore DNS to system default (DHCP) from the UI."""
+        with self._wifi_responder_lock:
+            if self._wifi_responder is None:
+                log.warning("Cannot restore DNS — WiFiResponder not available")
+                return False
+            try:
+                result = self._wifi_responder.dns_manager.restore_default()
+                log.info("DNS restored to default via UI (success=%s)", result)
+                return result
+            except Exception as exc:
+                log.error("DNS restore via UI failed: %s", exc)
+                return False
+

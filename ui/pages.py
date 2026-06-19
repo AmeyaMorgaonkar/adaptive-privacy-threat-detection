@@ -141,6 +141,87 @@ class DashboardPage(QWidget):
         vpn_rl.addWidget(vpn_card)
         lay.addWidget(vpn_row)
 
+        # ── DNS Protection Dropdown ──
+        dns_row = QWidget()
+        dns_rl = QHBoxLayout(dns_row)
+        dns_rl.setContentsMargins(0, 0, 0, 15)
+        dns_rl.setSpacing(0)
+
+        dns_card = GlassFrame(dns_row)
+        dns_lay = QHBoxLayout(dns_card)
+        dns_lay.setContentsMargins(22, 16, 22, 16)
+        dns_lay.setSpacing(14)
+
+        dns_icon = QLabel("🔒")
+        dns_icon.setFont(QFont("Segoe UI", 20))
+        dns_lay.addWidget(dns_icon)
+
+        dns_text = QVBoxLayout()
+        dns_text.setSpacing(2)
+        dns_title = QLabel("DNS Protection")
+        dns_title.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
+        dns_title.setStyleSheet(f"color: {t['text_primary']};")
+        dns_text.addWidget(dns_title)
+        self._dns_status_lbl = QLabel("System Default")
+        self._dns_status_lbl.setFont(QFont("Segoe UI", 10))
+        self._dns_status_lbl.setStyleSheet(f"color: {t['text_secondary']};")
+        dns_text.addWidget(self._dns_status_lbl)
+        dns_lay.addLayout(dns_text)
+        dns_lay.addStretch()
+
+        # Build the styled dropdown
+        self._dns_combo = QComboBox(dns_card)
+        self._dns_combo.setFont(QFont("Segoe UI", 10))
+        self._dns_combo.setFixedWidth(170)
+        self._dns_combo.setFixedHeight(32)
+        self._dns_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        # Populate with providers
+        self._dns_combo.addItem("System Default")
+        providers = getattr(config, "ENCRYPTED_DNS_PROVIDERS", {})
+        for name in providers:
+            self._dns_combo.addItem(name)
+
+        # Style the combo to match theme
+        self._dns_combo.setStyleSheet(f"""
+            QComboBox {{
+                background-color: {t.get('card_bg', '#1F2937')};
+                color: {t['text_primary']};
+                border: 1px solid {t.get('input_border', '#374151')};
+                border-radius: 8px;
+                padding: 4px 12px;
+            }}
+            QComboBox:hover {{
+                border-color: {t['accent']};
+            }}
+            QComboBox::drop-down {{
+                border: none;
+                width: 24px;
+            }}
+            QComboBox::down-arrow {{
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 6px solid {t['text_secondary']};
+                margin-right: 8px;
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {t.get('card_bg', '#1F2937')};
+                color: {t['text_primary']};
+                border: 1px solid {t.get('input_border', '#374151')};
+                border-radius: 6px;
+                selection-background-color: {t.get('accent_tint', '#064E3B')};
+                selection-color: {t['accent']};
+                padding: 4px;
+            }}
+        """)
+
+        self._dns_combo.currentTextChanged.connect(self._on_dns_changed)
+        dns_lay.addWidget(self._dns_combo)
+
+        dns_rl.addWidget(dns_card)
+        lay.addWidget(dns_row)
+
         # ── Row 2: Module scores + Actions ──
         r2 = QWidget()
         r2g = QGridLayout(r2)
@@ -242,6 +323,24 @@ class DashboardPage(QWidget):
         if self.data_bridge:
             self.data_bridge.set_vpn_state(checked)
 
+    # ── DNS dropdown handler ──
+
+    def _on_dns_changed(self, provider_name: str):
+        """Called when the user selects a DNS provider from the dropdown."""
+        if not self.data_bridge:
+            return
+        t = _t()
+        if provider_name == "System Default":
+            self._dns_status_lbl.setText("Restoring DHCP…")
+            self._dns_status_lbl.setStyleSheet(f"color: {t['warning']};")
+            self.data_bridge.restore_default_dns()
+        else:
+            providers = getattr(config, "ENCRYPTED_DNS_PROVIDERS", {})
+            desc = providers.get(provider_name, {}).get("description", "")
+            self._dns_status_lbl.setText(f"Switching to {provider_name}…")
+            self._dns_status_lbl.setStyleSheet(f"color: {t['warning']};")
+            self.data_bridge.switch_dns_provider(provider_name)
+
     # ── Live data refresh (called by App.on_refresh) ──
 
     def refresh(self, score):
@@ -276,6 +375,28 @@ class DashboardPage(QWidget):
             else:
                 self._vpn_status_lbl.setText("Inactive")
                 self._vpn_status_lbl.setStyleSheet(f"color: {t['text_secondary']};")
+        except Exception:
+            pass
+
+        # ── Sync DNS dropdown with backend state ──
+        try:
+            if self.data_bridge:
+                active_dns = self.data_bridge.get_active_dns_provider()
+                t = _t()
+                # Update combo without triggering signal
+                if self._dns_combo.currentText() != active_dns:
+                    self._dns_combo.blockSignals(True)
+                    idx = self._dns_combo.findText(active_dns)
+                    if idx >= 0:
+                        self._dns_combo.setCurrentIndex(idx)
+                    self._dns_combo.blockSignals(False)
+                # Update status label
+                if active_dns == "System Default":
+                    self._dns_status_lbl.setText("System Default")
+                    self._dns_status_lbl.setStyleSheet(f"color: {t['text_secondary']};")
+                else:
+                    self._dns_status_lbl.setText(f"{active_dns} · Encrypted (DoH)")
+                    self._dns_status_lbl.setStyleSheet(f"color: {t['accent']};")
         except Exception:
             pass
 

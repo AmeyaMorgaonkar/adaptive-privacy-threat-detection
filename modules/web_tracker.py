@@ -389,11 +389,19 @@ class WebTrackerMonitor:
 
     # ── Active Connection Inspection ─────────────────────────────────
 
+    # Maximum connections to inspect per cycle (avoid long hangs)
+    _MAX_CONNECTIONS_TO_INSPECT = 100
+
     def get_active_tracker_connections(self) -> list[TrackerConnection]:
         """Inspect active TCP/UDP connections and match against blocklist.
 
         Uses psutil.net_connections() + reverse DNS lookup.
+        Caps the number of inspected connections to avoid long hangs.
+        Reverse DNS lookups are batched concurrently to avoid sequential
+        timeout delays.
         """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         self._load_blocklist()
         connections: list[TrackerConnection] = []
 
@@ -406,16 +414,42 @@ class WebTrackerMonitor:
             log.debug("net_connections() failed: %s", exc)
             return connections
 
+        # Collect connection metadata (capped), then batch-resolve IPs
+        conn_infos: list[tuple] = []  # (remote_ip, remote_port, local_port, conn_type)
         for conn in net_conns:
             if not conn.raddr:
                 continue
+            if len(conn_infos) >= self._MAX_CONNECTIONS_TO_INSPECT:
+                log.debug("Connection inspection cap reached (%d)",
+                          self._MAX_CONNECTIONS_TO_INSPECT)
+                break
+            conn_infos.append((
+                conn.raddr.ip,
+                conn.raddr.port,
+                conn.laddr.port if conn.laddr else 0,
+                conn.type.name if hasattr(conn.type, "name") else str(conn.type),
+            ))
 
-            remote_ip = conn.raddr.ip
-            remote_port = conn.raddr.port
-            local_port = conn.laddr.port if conn.laddr else 0
+        # Batch-resolve all unique IPs concurrently
+        unique_ips = {info[0] for info in conn_infos}
+        uncached_ips = [ip for ip in unique_ips if ip not in self._reverse_dns_cache]
 
-            # Reverse DNS lookup (cached)
-            domain = self._reverse_lookup(remote_ip)
+        if uncached_ips:
+            with ThreadPoolExecutor(
+                max_workers=min(20, len(uncached_ips)),
+                thread_name_prefix="ReverseDNS",
+            ) as pool:
+                futures = {pool.submit(self._reverse_lookup, ip): ip
+                           for ip in uncached_ips}
+                for future in as_completed(futures, timeout=5):
+                    try:
+                        future.result()
+                    except Exception:
+                        pass  # _reverse_lookup already caches failures
+
+        # Now match connections against blocklist using cached lookups
+        for remote_ip, remote_port, local_port, proto in conn_infos:
+            domain = self._reverse_dns_cache.get(remote_ip, remote_ip)
 
             # Check if known tracker
             match = self._match_domain(domain) if domain else None
@@ -426,28 +460,40 @@ class WebTrackerMonitor:
                     remote_ip=remote_ip,
                     remote_domain=domain or remote_ip,
                     local_port=local_port,
-                    protocol=conn.type.name if hasattr(conn.type, "name") else str(conn.type),
+                    protocol=proto,
                     data_volume_kb=0.0,  # psutil doesn't track per-connection volume
                     is_known_tracker=match is not None,
                 )
                 if match:
                     connections.append(tc)
 
-        log.debug("Active tracker connections: %d", len(connections))
+        log.debug("Active tracker connections: %d (inspected %d)",
+                  len(connections), len(conn_infos))
         return connections
 
+    # Timeout for reverse DNS lookups (seconds)
+    _REVERSE_DNS_TIMEOUT_SEC = 0.5
+
     def _reverse_lookup(self, ip: str) -> str:
-        """Cached reverse DNS lookup for an IP address."""
+        """Cached reverse DNS lookup for an IP address with timeout.
+
+        Uses a default socket timeout to prevent indefinite blocking
+        on unresolvable addresses.
+        """
         if ip in self._reverse_dns_cache:
             return self._reverse_dns_cache[ip]
 
+        old_timeout = socket.getdefaulttimeout()
         try:
+            socket.setdefaulttimeout(self._REVERSE_DNS_TIMEOUT_SEC)
             hostname, _, _ = socket.gethostbyaddr(ip)
             self._reverse_dns_cache[ip] = hostname
             return hostname
-        except (socket.herror, socket.gaierror, OSError):
+        except (socket.herror, socket.gaierror, OSError, socket.timeout):
             self._reverse_dns_cache[ip] = ip
             return ip
+        finally:
+            socket.setdefaulttimeout(old_timeout)
 
     # ── HTTP Header Anomaly Detection ────────────────────────────────
 

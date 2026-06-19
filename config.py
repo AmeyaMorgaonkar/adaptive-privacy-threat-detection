@@ -19,6 +19,7 @@ WINDOW_HEIGHT = 700
 
 # ── Wi-Fi Analysis (Milestone 01) ───────────────────────────────────
 SCAN_INTERVAL_SECONDS = 30            # How often to re-scan (seconds)
+WIFI_SCAN_INTERVAL_SECONDS = 90       # WiFi hardware scan interval (heavier; needs location permission)
 WIFI_SIGNAL_WARN_DBM = -70            # Warn below this signal
 WIFI_SIGNAL_CRITICAL_DBM = -85        # Critical below this
 EVIL_TWIN_RSSI_DELTA = 10             # dBm difference to flag twin
@@ -161,12 +162,40 @@ FINGERPRINT_KNOWN_ENDPOINTS = [
     "cdn.amplitude.com",
 ]
 
-# DNS providers for hardened DNS switching
+# DNS providers with DNS-over-HTTPS (DoH) templates for encrypted resolution
+ENCRYPTED_DNS_PROVIDERS = {
+    "Cloudflare": {
+        "servers": ["1.1.1.1", "1.0.0.1"],
+        "doh_template": "https://cloudflare-dns.com/dns-query",
+        "description": "Fast, privacy-first DNS (no logging)",
+    },
+    "Quad9": {
+        "servers": ["9.9.9.9", "149.112.112.112"],
+        "doh_template": "https://dns.quad9.net/dns-query",
+        "description": "Malware-blocking + privacy DNS",
+    },
+    "Google": {
+        "servers": ["8.8.8.8", "8.8.4.4"],
+        "doh_template": "https://dns.google/dns-query",
+        "description": "Google Public DNS with DoH",
+    },
+    "OpenDNS": {
+        "servers": ["208.67.222.222", "208.67.220.220"],
+        "doh_template": "https://doh.opendns.com/dns-query",
+        "description": "Cisco OpenDNS with content filtering",
+    },
+    "NextDNS": {
+        "servers": ["45.90.28.0", "45.90.30.0"],
+        "doh_template": "https://dns.nextdns.io",
+        "description": "Customizable privacy DNS + ad blocking",
+    },
+}
+DEFAULT_DNS_PROVIDER = "Cloudflare"         # Used for auto-switching on threats
+AUTO_DNS_SWITCH_ENABLED = True              # Auto-switch DNS on threat detection
+
+# Legacy alias — kept for backward compatibility with existing code
 HARDENED_DNS_PROVIDERS = {
-    "cloudflare": ["1.1.1.1", "1.0.0.1"],
-    "google":     ["8.8.8.8", "8.8.4.4"],
-    "quad9":      ["9.9.9.9", "149.112.112.112"],
-    "opendns":    ["208.67.222.222", "208.67.220.220"],
+    k.lower(): v["servers"] for k, v in ENCRYPTED_DNS_PROVIDERS.items()
 }
 
 # Per-category web alert cooldowns (seconds)
