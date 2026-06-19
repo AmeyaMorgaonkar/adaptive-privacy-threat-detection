@@ -307,7 +307,7 @@ class DNSManager:
                 )
                 if result.returncode == 0:
                     log.info(
-                        "DoH template registered for %s → %s",
+                        "DoH template registered for %s -> %s",
                         server, doh_template,
                     )
                 else:

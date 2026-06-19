@@ -44,6 +44,11 @@ class WiFiResponder:
         self._network_protection_enabled = False
         self._manual_override = False
         self._vpn_process: subprocess.Popen | None = None
+        
+        import threading
+        self._vpn_status = "disconnected"
+        self._vpn_status_lock = threading.Lock()
+        
         config.DATA_DIR.mkdir(parents=True, exist_ok=True)
 
         # DNS management via the shared DNSManager
@@ -53,10 +58,65 @@ class WiFiResponder:
         # Detect and adopt any orphaned OpenVPN process from a previous run
         self._detect_existing_vpn()
 
+        # Initialize active country
+        countries = self.get_available_countries()
+        self._vpn_country = countries[0] if countries else "Japan"
+
+    @property
+    def vpn_status(self) -> str:
+        """Thread-safe getter for VPN status."""
+        with self._vpn_status_lock:
+            if self._vpn_status == "connected":
+                is_active = False
+                if self._vpn_process is not None and self._vpn_process.poll() is None:
+                    is_active = True
+                elif self._is_openvpn_running_system():
+                    is_active = True
+                elif self._network_protection_enabled and self._vpn_process is None:
+                    is_active = True
+                if not is_active:
+                    self._vpn_status = "disconnected"
+            elif self._vpn_status == "disconnected":
+                if self._is_openvpn_running_system():
+                    self._vpn_status = "connected"
+            return self._vpn_status
+
+    @vpn_status.setter
+    def vpn_status(self, val: str) -> None:
+        """Thread-safe setter for VPN status."""
+        with self._vpn_status_lock:
+            self._vpn_status = val
+
     @property
     def dns_manager(self):
         """Expose the DNSManager for UI-driven DNS switching."""
         return self._dns_manager
+
+    def get_available_countries(self) -> list[str]:
+        """Discover countries based on folders in the VPN config directory."""
+        vpn_dir = Path(getattr(config, "VPN_CONFIG_DIR", "assets"))
+        if not vpn_dir.is_dir():
+            return ["Japan", "USA"]
+        
+        countries = []
+        try:
+            for p in vpn_dir.iterdir():
+                if p.is_dir() and not p.name.startswith("."):
+                    if list(p.glob("*.ovpn")):
+                        countries.append(p.name)
+        except Exception as exc:
+            log.warning("Failed to iterate VPN config directory for countries: %s", exc)
+            
+        countries.sort()
+        return countries if countries else ["Japan", "USA"]
+
+    def get_vpn_country(self) -> str:
+        """Get the active VPN country name."""
+        return self._vpn_country
+
+    def set_vpn_country(self, country: str) -> None:
+        """Set the active VPN country name."""
+        self._vpn_country = country
 
     # ── Main entry point ─────────────────────────────────────────────
 
@@ -84,11 +144,13 @@ class WiFiResponder:
             summary = "; ".join(report.threats_detected) or "Unnamed threat"
             self.alert_user(f"[{report.severity}] {summary}")
 
-        # VPN — trigger at MEDIUM and above (skip if user manually disabled)
+        # VPN/DNS — trigger at MEDIUM and above (skip if user manually disabled)
         if report.severity in ("MEDIUM", "HIGH", "CRITICAL") and not self._manual_override:
-            self._enable_network_protection(
-                reason=f"Wi-Fi severity {report.severity}",
-            )
+            if getattr(config, "AUTO_CONNECT_VPN", True) or getattr(config, "AUTO_DNS_SWITCH_ENABLED", True):
+                self._enable_network_protection(
+                    reason=f"Wi-Fi severity {report.severity}",
+                    is_auto=True,
+                )
 
         # Disconnect (safety-off by default)
         if report.severity == "CRITICAL" and config.AUTO_DISCONNECT_ON_ROGUE:
@@ -108,7 +170,7 @@ class WiFiResponder:
         threshold = getattr(
             config,
             "AUTO_PROTECTION_THREAT_SCORE_THRESHOLD",
-            75,
+            50,
         )
         wifi_triggered = (
             wifi_report is not None
@@ -137,18 +199,31 @@ class WiFiResponder:
             )
             return False
 
+        # If both auto connect VPN and auto switch DNS are disabled, do not enable anything
+        auto_vpn = getattr(config, "AUTO_CONNECT_VPN", True)
+        auto_dns = getattr(config, "AUTO_DNS_SWITCH_ENABLED", True)
+        if not auto_vpn and not auto_dns:
+            return False
+
         reasons = []
         if score_triggered:
             reasons.append(f"unified score {unified_score:.2f}/{threshold}")
         if wifi_triggered:
             reasons.append(f"Wi-Fi severity {wifi_report.severity}")
 
+        enabled_actions = []
+        if auto_vpn:
+            enabled_actions.append("VPN")
+        if auto_dns:
+            enabled_actions.append("DNS")
+
+        actions_str = " and ".join(enabled_actions)
         self.alert_user(
-            "Automatic network protection enabled ("
+            f"Automatic {actions_str} protection enabled ("
             + ", ".join(reasons)
             + ")."
         )
-        self._enable_network_protection(reason="; ".join(reasons))
+        self._enable_network_protection(reason="; ".join(reasons), is_auto=True)
         return True
 
     def planned_actions(self, report: WiFiReport) -> list[str]:
@@ -158,11 +233,14 @@ class WiFiResponder:
         if report.severity in ("MEDIUM", "HIGH", "CRITICAL"):
             actions.append("alert_user")
 
-        if report.severity in ("MEDIUM", "HIGH", "CRITICAL"):
+        if (
+            getattr(config, "AUTO_CONNECT_VPN", True)
+            and report.severity in ("MEDIUM", "HIGH", "CRITICAL")
+        ):
             actions.append("toggle_vpn(start)")
 
         if (
-            config.AUTO_ENABLE_DNS_PROTECTION
+            getattr(config, "AUTO_DNS_SWITCH_ENABLED", True)
             and report.severity in ("MEDIUM", "HIGH", "CRITICAL")
         ):
             actions.append("apply_hardened_dns")
@@ -176,10 +254,10 @@ class WiFiResponder:
 
     def alert_user(self, message: str) -> None:
         """Emit a user-facing alert via logging (and future UI hooks)."""
-        log.warning("⚠  ALERT: %s", message)
+        log.warning("WARNING ALERT: %s", message)
         # Future: push to Tkinter status bar / toast notification
 
-    def toggle_vpn(self, state: bool) -> None:
+    def toggle_vpn(self, state: bool, country: str | None = None) -> None:
         """Start or stop the VPN connection.
 
         Tries, in order:
@@ -189,7 +267,13 @@ class WiFiResponder:
         When starting, each ``.ovpn`` file in the config directory is
         attempted in turn until one succeeds.
         """
+        if country:
+            self._vpn_country = country
+
         action = "start" if state else "stop"
+
+        # Set intermediate status
+        self.vpn_status = "connecting" if state else "disconnected"
 
         # ── Resolve OpenVPN binary ────────────────────────────────────
         openvpn_bin = getattr(config, "OPENVPN_BINARY", "openvpn")
@@ -227,14 +311,26 @@ class WiFiResponder:
 
         # ── Start: discover .ovpn configs ─────────────────────────────
         vpn_dir = Path(getattr(config, "VPN_CONFIG_DIR", "assets"))
-        ovpn_files = sorted(vpn_dir.glob("*.ovpn")) if vpn_dir.is_dir() else []
+        country_dir = vpn_dir / self._vpn_country
+        if country_dir.is_dir() and list(country_dir.glob("*.ovpn")):
+            target_dir = country_dir
+            ovpn_files = sorted(country_dir.glob("*.ovpn"))
+        else:
+            log.warning(
+                "VPN country directory '%s' not found or empty, falling back to root '%s'",
+                country_dir, vpn_dir
+            )
+            target_dir = vpn_dir
+            ovpn_files = sorted(vpn_dir.glob("*.ovpn")) if vpn_dir.is_dir() else []
 
         if not ovpn_files:
             log.warning(
-                "No .ovpn files found in %s — cannot start OpenVPN", vpn_dir,
+                "No .ovpn files found in %s — cannot start OpenVPN", target_dir,
             )
             if self._os == "Windows":
                 self._toggle_windows_builtin_vpn(state=True)
+            else:
+                self.vpn_status = "disconnected"
             return
 
         if not has_openvpn:
@@ -245,6 +341,8 @@ class WiFiResponder:
             )
             if self._os == "Windows":
                 self._toggle_windows_builtin_vpn(state=True)
+            else:
+                self.vpn_status = "disconnected"
             return
 
         # Try each .ovpn file until one connects
@@ -263,7 +361,7 @@ class WiFiResponder:
             )
 
         for ovpn in ovpn_files:
-            log.info("Attempting VPN connection with config: %s", ovpn.name)
+            log.info("Attempting VPN connection with config: %s in %s", ovpn.name, target_dir)
             try:
                 # On Windows, --daemon is not supported.  Launch as a
                 # background process via Popen and check it stays alive.
@@ -275,6 +373,7 @@ class WiFiResponder:
                         cmd,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
+                        cwd=str(target_dir),
                         creationflags=(
                             subprocess.CREATE_NO_WINDOW
                             | subprocess.DETACHED_PROCESS
@@ -285,6 +384,7 @@ class WiFiResponder:
                     if proc.poll() is None:
                         # Process still running → connection in progress
                         self._vpn_process = proc
+                        self.vpn_status = "connected"
                         log.info(
                             "VPN started successfully via OpenVPN "
                             "(config=%s, pid=%d)",
@@ -308,9 +408,11 @@ class WiFiResponder:
                         unix_cmd,
                         capture_output=True,
                         text=True,
+                        cwd=str(target_dir),
                         timeout=30,
                     )
                     if result.returncode == 0:
+                        self.vpn_status = "connected"
                         log.info(
                             "VPN started successfully via OpenVPN (config=%s)",
                             ovpn.name,
@@ -332,6 +434,8 @@ class WiFiResponder:
         # Last resort: Windows built-in VPN
         if self._os == "Windows":
             self._toggle_windows_builtin_vpn(state=True)
+        else:
+            self.vpn_status = "disconnected"
 
     def _toggle_windows_builtin_vpn(self, state: bool) -> None:
         """Connect/disconnect using Windows built-in VPN profiles.
@@ -363,6 +467,7 @@ class WiFiResponder:
                     "Network & Internet > VPN, or place .ovpn files in %s",
                     action, getattr(config, "VPN_CONFIG_DIR", "assets"),
                 )
+                self.vpn_status = "disconnected"
                 return
 
             vpn_name = profiles[0]
@@ -384,18 +489,23 @@ class WiFiResponder:
 
             if result.returncode == 0:
                 log.info("Windows VPN %s succeeded (profile='%s')", action, vpn_name)
+                self.vpn_status = "connected" if state else "disconnected"
             else:
                 stderr = result.stderr.strip() or result.stdout.strip()
                 log.error(
                     "Windows VPN %s failed (profile='%s', code=%d): %s",
                     action, vpn_name, result.returncode, stderr,
                 )
+                self.vpn_status = "disconnected"
         except FileNotFoundError:
             log.error("rasdial or powershell not found on PATH")
+            self.vpn_status = "disconnected"
         except subprocess.TimeoutExpired:
             log.error("Windows VPN %s timed out", action)
+            self.vpn_status = "disconnected"
         except Exception as exc:
             log.error("Windows VPN %s failed: %s", action, exc)
+            self.vpn_status = "disconnected"
 
     def disconnect_network(self) -> None:
         """Disconnect from the current Wi-Fi network.
@@ -457,37 +567,56 @@ class WiFiResponder:
         provider = getattr(config, "DEFAULT_DNS_PROVIDER", "Cloudflare")
         self._dns_manager.switch_provider(provider)
 
-    def _enable_network_protection(self, reason: str) -> None:
+    def _enable_network_protection(self, reason: str, is_auto: bool = False) -> None:
         """Turn on VPN and DNS hardening once per session."""
+        vpn_should_run = not is_auto or getattr(config, "AUTO_CONNECT_VPN", True)
+        dns_should_run = getattr(config, "AUTO_ENABLE_DNS_PROTECTION", True) and (
+            not is_auto or getattr(config, "AUTO_DNS_SWITCH_ENABLED", True)
+        )
+
         if self._network_protection_enabled:
-            # Verify the VPN process is actually still alive
-            if (
-                self._vpn_process is not None
-                and self._vpn_process.poll() is None
-            ):
-                log.debug("Network protection already enabled; skipping (%s)", reason)
+            if vpn_should_run:
+                # Verify the VPN process is actually still alive
+                if (
+                    self._vpn_process is not None
+                    and self._vpn_process.poll() is None
+                ):
+                    log.debug("Network protection already enabled; skipping (%s)", reason)
+                    return
+                # VPN process died — allow retry
+                log.warning(
+                    "VPN process no longer running — retrying protection (%s)",
+                    reason,
+                )
+                self._network_protection_enabled = False
+            else:
+                log.debug("Network protection (DNS-only) already active; skipping (%s)", reason)
                 return
-            # VPN process died — allow retry
-            log.warning(
-                "VPN process no longer running — retrying protection (%s)",
-                reason,
-            )
-            self._network_protection_enabled = False
 
         log.warning("Enabling network protection: %s", reason)
-        self.toggle_vpn(state=True)
-        if config.AUTO_ENABLE_DNS_PROTECTION:
-            self._apply_hardened_dns()
+        
+        if vpn_should_run:
+            self.toggle_vpn(state=True)
+        else:
+            log.info("Auto-connect VPN is disabled; skipping VPN connection")
 
-        # Only mark as enabled if VPN actually started
+        if dns_should_run:
+            self._apply_hardened_dns()
+        else:
+            log.info("Auto-switch DNS is disabled; skipping DNS hardening")
+
+        # Determine if we successfully enabled what we intended to enable
         vpn_alive = (
             self._vpn_process is not None
             and self._vpn_process.poll() is None
-        )
-        if vpn_alive:
+        ) or self.vpn_status == "connected"
+        vpn_success = not vpn_should_run or vpn_alive
+
+        if vpn_success:
             self._network_protection_enabled = True
-            self._manual_override = False
-            log.info("Network protection fully enabled (VPN pid=%d)", self._vpn_process.pid)
+            if is_auto:
+                self._manual_override = False
+            log.info("Network protection enabled (VPN=%s, DNS=%s)", vpn_should_run, dns_should_run)
         else:
             log.warning(
                 "VPN did not start — network protection will retry next cycle"

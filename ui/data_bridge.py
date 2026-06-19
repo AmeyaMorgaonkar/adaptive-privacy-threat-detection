@@ -265,11 +265,23 @@ class DataBridge:
                 return False
             return self._wifi_responder.is_vpn_active
 
+    def get_vpn_status(self) -> str:
+        """Query the WiFiResponder for current VPN connection status.
+        Returns 'disconnected', 'connecting', or 'connected'.
+        """
+        with self._wifi_responder_lock:
+            if self._wifi_responder is None:
+                return "disconnected"
+            try:
+                return self._wifi_responder.vpn_status
+            except Exception:
+                return "disconnected"
+
     def set_vpn_state(self, enabled: bool) -> None:
         """Toggle VPN on/off from the UI.
 
-        Runs in the calling thread (UI).  The actual subprocess work is
-        fast (sends a signal / launches a process), so it's acceptable.
+        Should be called from a background thread (e.g. QThread) when triggered by UI
+        to avoid blocking the main event loop due to slow subprocess calls.
         """
         with self._wifi_responder_lock:
             if self._wifi_responder is None:
@@ -280,6 +292,51 @@ class DataBridge:
             else:
                 self._wifi_responder.disable_network_protection()
         log.info("VPN toggled via UI: %s", "ON" if enabled else "OFF")
+
+    def get_vpn_countries(self) -> list[str]:
+        """Query the list of available VPN countries."""
+        with self._wifi_responder_lock:
+            if self._wifi_responder is not None:
+                try:
+                    return self._wifi_responder.get_available_countries()
+                except Exception as exc:
+                    log.error("Failed to get VPN countries via responder: %s", exc)
+        
+        # Static fallback if responder is not initialized yet: scan directory directly
+        try:
+            vpn_dir = Path(getattr(config, "VPN_CONFIG_DIR", "assets"))
+            if vpn_dir.is_dir():
+                countries = []
+                for p in vpn_dir.iterdir():
+                    if p.is_dir() and not p.name.startswith("."):
+                        if list(p.glob("*.ovpn")):
+                            countries.append(p.name)
+                if countries:
+                    countries.sort()
+                    return countries
+        except Exception as exc:
+            log.error("Failed to scan directory for countries directly: %s", exc)
+        return ["Japan", "USA"]
+
+    def get_vpn_country(self) -> str:
+        """Get the active VPN country name."""
+        with self._wifi_responder_lock:
+            if self._wifi_responder is None:
+                return "Japan"
+            try:
+                return self._wifi_responder.get_vpn_country()
+            except Exception:
+                return "Japan"
+
+    def set_vpn_country(self, country: str) -> None:
+        """Set the active VPN country name."""
+        with self._wifi_responder_lock:
+            if self._wifi_responder is None:
+                return
+            try:
+                self._wifi_responder.set_vpn_country(country)
+            except Exception as exc:
+                log.error("Failed to set VPN country: %s", exc)
 
     # ── DNS control (Encrypted DNS switching) ────────────────────────
 

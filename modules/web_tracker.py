@@ -285,7 +285,10 @@ class WebTrackerMonitor:
     def _try_scapy_dns(self, duration_sec: int) -> Optional[list[str]]:
         """Attempt DNS sniffing via scapy (requires admin)."""
         try:
-            from scapy.all import sniff, DNS, DNSQR
+            import contextlib
+            import io
+            with contextlib.redirect_stderr(io.StringIO()):
+                from scapy.all import sniff, DNS, DNSQR
             domains: list[str] = []
 
             def _process_pkt(pkt):

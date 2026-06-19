@@ -42,7 +42,7 @@ class GlassFrame(QFrame):
         shadow_color = tokens.get("shadow", "rgba(0, 0, 0, 0.05)")
 
         self.setStyleSheet(f"""
-            GlassFrame {{
+            QFrame#GlassFrame {{
                 background-color: {bg};
                 border: 1px solid {border};
                 border-radius: {radius}px;

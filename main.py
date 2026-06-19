@@ -65,7 +65,7 @@ def _run_first_scan_concurrent(data_bridge, analyzer, profiler, web_monitor,
                         behavioral_report=results["behavioral"],
                         web_report=results["web"],
                     )
-                    log.info("First scan: %s module complete → pushed score %.1f",
+                    log.info("First scan: %s module complete -> pushed score %.1f",
                              key, score.unified_score)
             except Exception as exc:
                 log.error("First scan module error: %s", exc, exc_info=True)

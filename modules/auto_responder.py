@@ -504,7 +504,7 @@ class AutoResponder:
         if len(categories_above) >= escalation_count:
             if self._try_fire("web_multi_escalation"):
                 self._send_desktop_alert(
-                    title="⚠ Multi-Category Tracking Escalation",
+                    title="WARNING: Multi-Category Tracking Escalation",
                     message=(
                         f"{len(categories_above)} tracker categories active "
                         f"above threshold: {', '.join(categories_above)}. "
@@ -532,7 +532,7 @@ class AutoResponder:
         if unified_score >= 90:
             if self._try_fire("unified_alert_90"):
                 self._send_desktop_alert(
-                    title="⚠ CRITICAL THREAT LEVEL",
+                    title="CRITICAL THREAT LEVEL",
                     message=(
                         f"Unified threat score: {unified_score:.0f}/100. "
                         f"Multiple subsystems report elevated risk. "
@@ -566,7 +566,7 @@ class AutoResponder:
         if unified_score >= 50:
             if self._try_fire("unified_badge_50"):
                 log.info(
-                    "Dashboard tier badge → Elevated (unified=%.1f)",
+                    "Dashboard tier badge -> Elevated (unified=%.1f)",
                     unified_score,
                 )
                 fired.append("unified_badge_50")
@@ -586,7 +586,7 @@ class AutoResponder:
         Instead we log prominently; the UI reads alerts from the incident
         log / DataBridge history.
         """
-        log.warning("🔔 ALERT [%s] %s — %s", severity, title, message)
+        log.warning("ALERT [%s] %s - %s", severity, title, message)
         self._log_response(f"desktop_alert_{severity.lower().replace(' ', '_')}", {
             "title": title,
             "message": message,

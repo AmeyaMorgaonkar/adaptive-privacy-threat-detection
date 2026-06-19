@@ -5,13 +5,17 @@ Each page matches the design mockups and is wired for live data.
 
 from datetime import datetime
 import config
+import time
+from logger import get_logger
+
+log = get_logger(__name__)
 
 from PySide6.QtWidgets import (
     QWidget, QFrame, QLabel, QHBoxLayout, QVBoxLayout,
     QGridLayout, QPushButton, QComboBox, QLineEdit,
     QCheckBox, QMessageBox,
 )
-from PySide6.QtCore import Qt, QRectF
+from PySide6.QtCore import Qt, QRectF, QThread, Signal, Slot, QTimer
 from PySide6.QtGui import QFont, QPainter, QPen, QColor
 
 from ui.glass_frame import GlassFrame
@@ -54,6 +58,420 @@ def _vspacer(h=15):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# VPN AND DNS CONTROL CARDS (with custom power toggle button)
+# ═══════════════════════════════════════════════════════════════════════
+
+class VpnToggleThread(QThread):
+    finished_signal = Signal(bool, str) # (success, status)
+
+    def __init__(self, data_bridge, enabled, country=None, reconnect=False):
+        super().__init__()
+        self.data_bridge = data_bridge
+        self.enabled = enabled
+        self.country = country
+        self.reconnect = reconnect
+
+    def run(self):
+        try:
+            if self.data_bridge:
+                responder = getattr(self.data_bridge, "_wifi_responder", None)
+                if responder:
+                    if self.reconnect:
+                        log.info("VpnToggleThread: Reconnecting to VPN in country %s", self.country)
+                        responder.disable_network_protection()
+                        time.sleep(1.0)
+                        if self.country:
+                            responder.set_vpn_country(self.country)
+                        responder.manual_enable_vpn()
+                    else:
+                        if self.enabled:
+                            log.info("VpnToggleThread: Enabling VPN")
+                            if self.country:
+                                responder.set_vpn_country(self.country)
+                            responder.manual_enable_vpn()
+                        else:
+                            log.info("VpnToggleThread: Disabling VPN")
+                            responder.disable_network_protection()
+                    
+                    # Wait a moment to check final status
+                    time.sleep(0.5)
+                    status = responder.vpn_status
+                    success = (status == "connected") if self.enabled else (status == "disconnected")
+                    self.finished_signal.emit(success, status)
+                    return
+            self.finished_signal.emit(False, "disconnected")
+        except Exception as exc:
+            log.error("VpnToggleThread error: %s", exc)
+            self.finished_signal.emit(False, "disconnected")
+
+
+class DnsToggleThread(QThread):
+    finished_signal = Signal(bool, str)  # (success, active_provider)
+
+    def __init__(self, data_bridge, provider_name):
+        super().__init__()
+        self.data_bridge = data_bridge
+        self.provider_name = provider_name
+
+    def run(self):
+        try:
+            if self.data_bridge:
+                if self.provider_name == "System Default":
+                    success = self.data_bridge.restore_default_dns()
+                else:
+                    success = self.data_bridge.switch_dns_provider(self.provider_name)
+                
+                # Sleep briefly to ensure backend changes take effect
+                time.sleep(0.5)
+                active_dns = self.data_bridge.get_active_dns_provider()
+                self.finished_signal.emit(success, active_dns)
+                return
+            self.finished_signal.emit(False, "System Default")
+        except Exception as exc:
+            log.error("DnsToggleThread error: %s", exc)
+            self.finished_signal.emit(False, "System Default")
+
+
+class SentinelComboBox(QComboBox):
+    """Custom combobox that overrides native OS styles to overlay a custom text arrow."""
+    def __init__(self, parent=None, background=None):
+        super().__init__(parent)
+        self.setFrame(False)
+        t = _t()
+        bg = background or t['input_bg']
+        
+        # Hide the native drop-down arrow
+        self.setStyleSheet(f"""
+            QComboBox {{
+                background-color: {bg};
+                color: {t['text_primary']};
+                border: 1px solid #232733;
+                border-radius: 6px;
+                padding-left: 12px;
+                padding-right: 28px;
+                min-height: 32px;
+            }}
+            QComboBox:hover {{
+                border-color: {t['accent']};
+            }}
+            QComboBox::drop-down {{
+                width: 0px;
+                border: none;
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {t.get('card_bg', '#1F2937')};
+                color: {t['text_primary']};
+                border: 1px solid #232733;
+                border-radius: 6px;
+                selection-background-color: {t.get('accent_tint', '#064E3B')};
+                selection-color: {t['accent']};
+                padding: 4px;
+            }}
+        """)
+        
+        # Create standard QLabel containing text "▼"
+        self.arrow_label = QLabel("▼", self)
+        self.arrow_label.setStyleSheet("color: #a0aab4; background: transparent; border: none;")
+        self.arrow_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.arrow_label.setFont(QFont("Segoe UI Symbol", 8))
+        self.arrow_label.adjustSize()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Position label on the right side
+        self.arrow_label.move(self.width() - 20, (self.height() - self.arrow_label.height()) // 2)
+
+
+class PowerButton(QPushButton):
+    """Circular power button (toggle) that turns green when ON, no color when OFF,
+    and spins/animates when CONNECTING."""
+    def __init__(self, checked=False, parent=None):
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setChecked(checked)
+        self.setFixedSize(54, 54)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._is_connecting = False
+        self._spin_angle = 0
+        
+        # 30 FPS timer (approx. 33ms interval)
+        self._spin_timer = QTimer(self)
+        self._spin_timer.setInterval(33)
+        self._spin_timer.timeout.connect(self._rotate_spin)
+
+    def set_connecting(self, connecting: bool):
+        self._is_connecting = connecting
+        if connecting:
+            if not self._spin_timer.isActive():
+                self._spin_timer.start()
+        else:
+            self._spin_timer.stop()
+        self.update()
+
+    def is_connecting(self) -> bool:
+        return self._is_connecting
+
+    def _rotate_spin(self):
+        self._spin_angle = (self._spin_angle + 8) % 360
+        self.update()
+
+    def paintEvent(self, event):
+        t = _t()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        w, h = self.width(), self.height()
+        cx, cy = w / 2, h / 2
+        r = min(w, h) / 2
+        
+        # 1. Background
+        painter.setPen(Qt.PenStyle.NoPen)
+        if self._is_connecting:
+            bg_color = QColor(t.get('accent_tint', '#064E3B'))
+            painter.setBrush(bg_color)
+        elif self.isChecked():
+            bg_color = QColor(t['accent'])
+            painter.setBrush(bg_color)
+        else:
+            bg_color = QColor("transparent")
+            painter.setBrush(bg_color)
+        painter.drawEllipse(0, 0, w, h)
+        
+        # 2. Border / Spinning Arc
+        if self._is_connecting:
+            pen = QPen(QColor(t['accent']), 3)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawArc(QRectF(2, 2, w - 4, h - 4), -self._spin_angle * 16, 270 * 16)
+        elif not self.isChecked():
+            pen = QPen(QColor(t['divider']), 2)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(1, 1, w - 2, h - 2)
+            
+        # 3. Power Symbol (\u23fb)
+        symbol_color = QColor("#FFFFFF") if (self.isChecked() or self._is_connecting) else QColor(t['text_secondary'])
+        painter.setPen(symbol_color)
+        painter.setFont(QFont("Segoe UI Symbol", 20, QFont.Weight.Bold))
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "\u23fb")
+        painter.end()
+
+    def update_style(self):
+        self.update()
+
+
+class VpnCard(GlassFrame):
+    """
+    Dashboard card for VPN control.
+    Includes a title, a circular power toggle button, a status label, and a location selector.
+    """
+    def __init__(self, parent=None, data_bridge=None):
+        super().__init__(parent)
+        self.data_bridge = data_bridge
+        t = _t()
+        
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(18, 16, 18, 16)
+        lay.setSpacing(8)
+        
+        # Title
+        title_lbl = QLabel("VPN")
+        title_lbl.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        title_lbl.setStyleSheet(f"color: {t['text_muted']};")
+        title_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        lay.addWidget(title_lbl)
+        
+        # Center: Power Button
+        self.power_btn = PowerButton(checked=False, parent=self)
+        self.power_btn.toggled.connect(self._on_power_toggled)
+        lay.addWidget(self.power_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        
+        # Status Label
+        self.status_lbl = QLabel("Disconnected")
+        self.status_lbl.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        self.status_lbl.setStyleSheet(f"color: {t['text_secondary']};")
+        self.status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_lbl.setFixedHeight(18)
+        lay.addWidget(self.status_lbl)
+        
+        # Bottom: Location Selector (dynamically populated)
+        self.location_combo = SentinelComboBox(self, background="transparent")
+        if self.data_bridge:
+            countries = self.data_bridge.get_vpn_countries()
+            for country in countries:
+                self.location_combo.addItem(country)
+            
+            # Select the currently active country in DataBridge if set
+            current_country = self.data_bridge.get_vpn_country()
+            idx = self.location_combo.findText(current_country)
+            if idx >= 0:
+                self.location_combo.setCurrentIndex(idx)
+        else:
+            self.location_combo.addItem("Japan")
+            self.location_combo.addItem("USA")
+            
+        self.location_combo.setFont(QFont("Segoe UI", 10))
+        self.location_combo.setFixedHeight(32)
+        self.location_combo.setFixedWidth(130)
+        self.location_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        
+        self.location_combo.activated.connect(lambda: self._on_location_changed(self.location_combo.currentText()))
+        lay.addWidget(self.location_combo, alignment=Qt.AlignmentFlag.AlignCenter)
+
+    def _on_power_toggled(self, checked: bool):
+        p = self.parent()
+        while p and not hasattr(p, "_on_vpn_toggle"):
+            p = p.parent()
+        if p:
+            p._on_vpn_toggle(checked)
+
+    def _on_location_changed(self, location: str):
+        # Update the active country in data_bridge
+        if self.data_bridge:
+            self.data_bridge.set_vpn_country(location)
+
+        # If VPN is ON, reconnect
+        if self.power_btn.isChecked():
+            p = self.parent()
+            while p and not hasattr(p, "_on_vpn_reconnect"):
+                p = p.parent()
+            if p:
+                p._on_vpn_reconnect(location)
+
+    def setCheckedSilently(self, checked: bool):
+        self.power_btn.blockSignals(True)
+        self.power_btn.setChecked(checked)
+        self.power_btn.update_style()
+        self.power_btn.blockSignals(False)
+
+    def setCountrySilently(self, country: str):
+        self.location_combo.blockSignals(True)
+        idx = self.location_combo.findText(country)
+        if idx >= 0:
+            self.location_combo.setCurrentIndex(idx)
+        self.location_combo.blockSignals(False)
+
+    def setStatus(self, status: str):
+        t = _t()
+        if status == "connecting":
+            self.status_lbl.setText("Connecting...")
+            self.status_lbl.setStyleSheet("color: #F59E0B;") # Amber
+            self.power_btn.setEnabled(False)
+            self.power_btn.set_connecting(True)
+            self.location_combo.setEnabled(False)
+        elif status == "disconnecting":
+            self.status_lbl.setText("Disconnecting...")
+            self.status_lbl.setStyleSheet("color: #EF4444;") # Red-ish
+            self.power_btn.setEnabled(False)
+            self.power_btn.set_connecting(True)
+            self.location_combo.setEnabled(False)
+        elif status == "connected":
+            self.status_lbl.setText("Connected")
+            self.status_lbl.setStyleSheet(f"color: {t['accent']};") # Green
+            self.power_btn.setEnabled(True)
+            self.power_btn.set_connecting(False)
+            self.location_combo.setEnabled(True)
+            self.setCheckedSilently(True)
+        else: # disconnected
+            self.status_lbl.setText("Disconnected")
+            self.status_lbl.setStyleSheet(f"color: {t['text_secondary']};")
+            self.power_btn.setEnabled(True)
+            self.power_btn.set_connecting(False)
+            self.location_combo.setEnabled(True)
+            self.setCheckedSilently(False)
+
+
+class DnsCard(GlassFrame):
+    """
+    Dashboard card for DNS switching control.
+    Includes a title, a circular power toggle button, a dummy status label for alignment, and a DNS provider selector.
+    """
+    def __init__(self, parent=None, data_bridge=None):
+        super().__init__(parent)
+        self.data_bridge = data_bridge
+        t = _t()
+        
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(18, 16, 18, 16)
+        lay.setSpacing(8)
+        
+        # Title
+        title_lbl = QLabel("DNS SWITCHING")
+        title_lbl.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        title_lbl.setStyleSheet(f"color: {t['text_muted']};")
+        title_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        lay.addWidget(title_lbl)
+        
+        # Center: Power Button
+        self.power_btn = PowerButton(checked=False, parent=self)
+        self.power_btn.toggled.connect(self._on_power_toggled)
+        lay.addWidget(self.power_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        
+        # Dummy Status Label (empty text to align layout with VPN card)
+        self.status_lbl = QLabel("")
+        self.status_lbl.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        self.status_lbl.setStyleSheet("background: transparent; border: none;")
+        self.status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_lbl.setFixedHeight(18)
+        lay.addWidget(self.status_lbl)
+        
+        # Bottom: DNS Provider Selector
+        self.dns_combo = SentinelComboBox(self, background="transparent")
+        self.dns_combo.setFont(QFont("Segoe UI", 10))
+        self.dns_combo.setFixedHeight(32)
+        self.dns_combo.setFixedWidth(170)
+        self.dns_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        
+        lay.addWidget(self.dns_combo, alignment=Qt.AlignmentFlag.AlignCenter)
+        
+        # Populate combobox
+        self.dns_combo.addItem("System Default")
+        providers = getattr(config, "ENCRYPTED_DNS_PROVIDERS", {})
+        for name in providers:
+            self.dns_combo.addItem(name)
+            
+        self.dns_combo.currentTextChanged.connect(self._on_dns_combo_changed)
+
+    def set_loading(self, loading: bool):
+        self.power_btn.setEnabled(not loading)
+        self.power_btn.set_connecting(loading)
+        self.dns_combo.setEnabled(not loading)
+
+    def _on_power_toggled(self, checked: bool):
+        if checked:
+            if self.dns_combo.currentText() == "System Default":
+                providers = getattr(config, "ENCRYPTED_DNS_PROVIDERS", {})
+                first_provider = list(providers.keys())[0] if providers else "Cloudflare"
+                self.dns_combo.setCurrentText(first_provider)
+        else:
+            self.dns_combo.setCurrentText("System Default")
+
+    def _on_dns_combo_changed(self, provider_name: str):
+        is_on = provider_name != "System Default"
+        self.power_btn.blockSignals(True)
+        self.power_btn.setChecked(is_on)
+        self.power_btn.update_style()
+        self.power_btn.blockSignals(False)
+        
+        p = self.parent()
+        while p and not hasattr(p, "_on_dns_changed"):
+            p = p.parent()
+        if p:
+            p._on_dns_changed(provider_name)
+
+    def setProviderSilently(self, provider_name: str):
+        self.dns_combo.blockSignals(True)
+        self.dns_combo.setCurrentText(provider_name)
+        self.dns_combo.blockSignals(False)
+        
+        is_on = provider_name != "System Default"
+        self.power_btn.blockSignals(True)
+        self.power_btn.setChecked(is_on)
+        self.power_btn.update_style()
+        self.power_btn.blockSignals(False)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # PAGE: DASHBOARD  (live data from DataBridge)
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -61,6 +479,16 @@ class DashboardPage(QWidget):
     def __init__(self, parent, data_bridge):
         super().__init__(parent)
         self.data_bridge = data_bridge
+        
+        # VPN Async Thread & Timeout Timer
+        self._vpn_thread = None
+        self._vpn_timeout_timer = QTimer(self)
+        self._vpn_timeout_timer.setSingleShot(True)
+        self._vpn_timeout_timer.timeout.connect(self._on_vpn_timeout)
+        
+        # DNS Async Thread
+        self._dns_thread = None
+        
         t = _t()
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -92,135 +520,15 @@ class DashboardPage(QWidget):
         self.threats_card = StatCard(r1, "Active Threats", "--",
                         "No threats detected",
                                     value_color=t["danger"], top_icon="⚠️")
-        self.actions_card = StatCard(r1, "Actions Taken", "--",
-                        "Resolved automatically",
-                        value_color=t["accent"], top_icon="✅")
-        self.scan_card = StatCard(r1, "Last Scan", "--",
-                                 "System continuous monitoring",
-                                 value_size=24, top_icon="⏱")
+        self.vpn_card = VpnCard(r1, self.data_bridge)
+        self.dns_card = DnsCard(r1, self.data_bridge)
         r1g.addWidget(self.score_card, 0, 0)
         r1g.addWidget(self.threats_card, 0, 1)
-        r1g.addWidget(self.actions_card, 0, 2)
-        r1g.addWidget(self.scan_card, 0, 3)
+        r1g.addWidget(self.vpn_card, 0, 2)
+        r1g.addWidget(self.dns_card, 0, 3)
         for c in range(4):
             r1g.setColumnStretch(c, 1)
         lay.addWidget(r1)
-
-        # ── VPN Protection Toggle ──
-        vpn_row = QWidget()
-        vpn_rl = QHBoxLayout(vpn_row)
-        vpn_rl.setContentsMargins(0, 0, 0, 15)
-        vpn_rl.setSpacing(0)
-
-        vpn_card = GlassFrame(vpn_row)
-        vpn_lay = QHBoxLayout(vpn_card)
-        vpn_lay.setContentsMargins(22, 16, 22, 16)
-        vpn_lay.setSpacing(14)
-
-        vpn_icon = QLabel("🛡️")
-        vpn_icon.setFont(QFont("Segoe UI", 20))
-        vpn_lay.addWidget(vpn_icon)
-
-        vpn_text = QVBoxLayout()
-        vpn_text.setSpacing(2)
-        vpn_title = QLabel("VPN Protection")
-        vpn_title.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
-        vpn_title.setStyleSheet(f"color: {t['text_primary']};")
-        vpn_text.addWidget(vpn_title)
-        self._vpn_status_lbl = QLabel("Inactive")
-        self._vpn_status_lbl.setFont(QFont("Segoe UI", 10))
-        self._vpn_status_lbl.setStyleSheet(f"color: {t['text_secondary']};")
-        vpn_text.addWidget(self._vpn_status_lbl)
-        vpn_lay.addLayout(vpn_text)
-        vpn_lay.addStretch()
-
-        self._vpn_toggle = ToggleSwitch(vpn_card, checked=False)
-        self._vpn_toggle.toggled.connect(self._on_vpn_toggle)
-        vpn_lay.addWidget(self._vpn_toggle)
-
-        vpn_rl.addWidget(vpn_card)
-        lay.addWidget(vpn_row)
-
-        # ── DNS Protection Dropdown ──
-        dns_row = QWidget()
-        dns_rl = QHBoxLayout(dns_row)
-        dns_rl.setContentsMargins(0, 0, 0, 15)
-        dns_rl.setSpacing(0)
-
-        dns_card = GlassFrame(dns_row)
-        dns_lay = QHBoxLayout(dns_card)
-        dns_lay.setContentsMargins(22, 16, 22, 16)
-        dns_lay.setSpacing(14)
-
-        dns_icon = QLabel("🔒")
-        dns_icon.setFont(QFont("Segoe UI", 20))
-        dns_lay.addWidget(dns_icon)
-
-        dns_text = QVBoxLayout()
-        dns_text.setSpacing(2)
-        dns_title = QLabel("DNS Protection")
-        dns_title.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
-        dns_title.setStyleSheet(f"color: {t['text_primary']};")
-        dns_text.addWidget(dns_title)
-        self._dns_status_lbl = QLabel("System Default")
-        self._dns_status_lbl.setFont(QFont("Segoe UI", 10))
-        self._dns_status_lbl.setStyleSheet(f"color: {t['text_secondary']};")
-        dns_text.addWidget(self._dns_status_lbl)
-        dns_lay.addLayout(dns_text)
-        dns_lay.addStretch()
-
-        # Build the styled dropdown
-        self._dns_combo = QComboBox(dns_card)
-        self._dns_combo.setFont(QFont("Segoe UI", 10))
-        self._dns_combo.setFixedWidth(170)
-        self._dns_combo.setFixedHeight(32)
-        self._dns_combo.setCursor(Qt.CursorShape.PointingHandCursor)
-
-        # Populate with providers
-        self._dns_combo.addItem("System Default")
-        providers = getattr(config, "ENCRYPTED_DNS_PROVIDERS", {})
-        for name in providers:
-            self._dns_combo.addItem(name)
-
-        # Style the combo to match theme
-        self._dns_combo.setStyleSheet(f"""
-            QComboBox {{
-                background-color: {t.get('card_bg', '#1F2937')};
-                color: {t['text_primary']};
-                border: 1px solid {t.get('input_border', '#374151')};
-                border-radius: 8px;
-                padding: 4px 12px;
-            }}
-            QComboBox:hover {{
-                border-color: {t['accent']};
-            }}
-            QComboBox::drop-down {{
-                border: none;
-                width: 24px;
-            }}
-            QComboBox::down-arrow {{
-                image: none;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 6px solid {t['text_secondary']};
-                margin-right: 8px;
-            }}
-            QComboBox QAbstractItemView {{
-                background-color: {t.get('card_bg', '#1F2937')};
-                color: {t['text_primary']};
-                border: 1px solid {t.get('input_border', '#374151')};
-                border-radius: 6px;
-                selection-background-color: {t.get('accent_tint', '#064E3B')};
-                selection-color: {t['accent']};
-                padding: 4px;
-            }}
-        """)
-
-        self._dns_combo.currentTextChanged.connect(self._on_dns_changed)
-        dns_lay.addWidget(self._dns_combo)
-
-        dns_rl.addWidget(dns_card)
-        lay.addWidget(dns_row)
 
         # ── Row 2: Module scores + Actions ──
         r2 = QWidget()
@@ -256,72 +564,127 @@ class DashboardPage(QWidget):
         self._recommended_layout.setContentsMargins(0, 0, 0, 0)
         self._recommended_layout.setSpacing(8)
         # initial placeholder
-        self._no_recs_lbl = QLabel("No recommended actions")
+        self._no_recs_lbl = QLabel("✅ No recommended actions required.")
         self._no_recs_lbl.setFont(QFont("Segoe UI", 11))
-        self._no_recs_lbl.setStyleSheet(f"color: {t['text_secondary']};")
+        self._no_recs_lbl.setStyleSheet(f"color: {t['accent']};")
         self._recommended_layout.addWidget(self._no_recs_lbl)
         ra_lay.addWidget(self._recommended_widget)
         ra_lay.addWidget(_vspacer(8))
         r2g.addWidget(ra_card, 0, 1)
         lay.addWidget(r2)
 
-        # ── Row 3: Alerts + mini stats ──
-        r3 = QWidget()
-        r3g = QGridLayout(r3)
-        r3g.setContentsMargins(0, 0, 0, 15)
-        r3g.setSpacing(12)
-        r3g.setColumnStretch(0, 3)
-        r3g.setColumnStretch(1, 1)
-
-        al = GlassFrame(r3)
-        al_lay = QVBoxLayout(al)
-        al_lay.setContentsMargins(0, 0, 0, 0)
-        al_lay.setSpacing(0)
-        al_lay.addWidget(section_header(al, "Recent Alerts", "View All"))
-        al_lay.addWidget(table_header(al, [(100, "Time"), (100, "Module"),
-                                           (280, "Alert"), (100, "Severity")]))
-        alerts = [
-            ("10:42 AM", "Behaviour", "Multiple failed admin logins", "CRITICAL"),
-            ("09:15 AM", "Web", "Unusual outbound traffic spike", "WARNING"),
-            ("08:03 AM", "WiFi", "New unauthorized device connected", "WARNING"),
-            ("07:22 AM", "System", "Routine definition update applied", "INFO"),
-        ]
-        for time_, mod, alert, sev in alerts:
-            al_lay.addWidget(table_row(al, [(100, time_), (100, mod, "bold"),
-                                            (280, alert), (100, sev, "pill")]))
-        al_lay.addWidget(_vspacer(10))
-        r3g.addWidget(al, 0, 0)
-
-        sg = QWidget(r3)
-        sg_grid = QGridLayout(sg)
-        sg_grid.setContentsMargins(0, 0, 0, 0)
-        sg_grid.setSpacing(8)
-        self._mini_blocked = mini_stat(sg, "🛑", "--", "Blocked Req.")
-        sg_grid.addWidget(self._mini_blocked, 0, 0)
-        self._mini_suspicious = mini_stat(sg, "⚙️", "--", "Suspicious\nProc.")
-        sg_grid.addWidget(self._mini_suspicious, 0, 1)
-        self._mini_networks = mini_stat(sg, "📡", "--", "Networks\nScanned")
-        sg_grid.addWidget(self._mini_networks, 1, 0)
-        self._mini_data_sent = mini_stat(sg, "🔄", "--", "Data Sent")
-        sg_grid.addWidget(self._mini_data_sent, 1, 1)
-        r3g.addWidget(sg, 0, 1)
-        lay.addWidget(r3)
+        # ── Row 3: Active Threats ──
+        self.threats_table_frame = GlassFrame(self)
+        self.threats_table_lay = QVBoxLayout(self.threats_table_frame)
+        self.threats_table_lay.setContentsMargins(0, 0, 0, 0)
+        self.threats_table_lay.setSpacing(0)
+        self.threats_table_lay.addWidget(section_header(self.threats_table_frame, "Active Threats"))
+        self.threats_table_lay.addWidget(table_header(self.threats_table_frame, [
+            (150, "Module"),
+            (710, "Threat Description"),
+            (120, "Severity")
+        ]))
+        
+        # Row container
+        self._threats_rows_widget = QWidget(self.threats_table_frame)
+        self._threats_rows_lay = QVBoxLayout(self._threats_rows_widget)
+        self._threats_rows_lay.setContentsMargins(0, 0, 0, 0)
+        self._threats_rows_lay.setSpacing(0)
+        self.threats_table_lay.addWidget(self._threats_rows_widget)
+        
+        # Empty placeholder label when no threats
+        self._no_threats_lbl = QLabel("✅ No active threats detected.")
+        self._no_threats_lbl.setFont(QFont("Segoe UI", 11))
+        self._no_threats_lbl.setStyleSheet(f"color: {t['accent']};")
+        self._no_threats_lbl.setContentsMargins(22, 14, 22, 14)
+        self._threats_rows_lay.addWidget(self._no_threats_lbl)
+        
+        self.threats_table_lay.addWidget(_vspacer(10))
+        lay.addWidget(self.threats_table_frame)
         lay.addStretch()
 
     # ── VPN toggle handler ──
 
     def _on_vpn_toggle(self, checked: bool):
         """Called when the user clicks the VPN toggle switch."""
-        t = _t()
+        if self._vpn_thread and self._vpn_thread.isRunning():
+            log.warning("Vpn toggle requested but thread is already running")
+            return
+
+        # Start connecting/disconnecting visual transitions
         if checked:
-            self._vpn_status_lbl.setText("Connecting…")
-            self._vpn_status_lbl.setStyleSheet(f"color: {t['warning']};")
+            self.vpn_card.setStatus("connecting")
+            if self.data_bridge and self.data_bridge._wifi_responder:
+                self.data_bridge._wifi_responder.vpn_status = "connecting"
+            # Start 12s timeout guard for connection phase
+            self._vpn_timeout_timer.start(12000)
         else:
-            self._vpn_status_lbl.setText("Disconnecting…")
-            self._vpn_status_lbl.setStyleSheet(f"color: {t['warning']};")
-        # Dispatch to DataBridge → WiFiResponder
-        if self.data_bridge:
-            self.data_bridge.set_vpn_state(checked)
+            self.vpn_card.setStatus("disconnecting")
+            if self.data_bridge and self.data_bridge._wifi_responder:
+                self.data_bridge._wifi_responder.vpn_status = "disconnecting"
+            # Start 5s timeout guard for disconnection phase
+            self._vpn_timeout_timer.start(5000)
+
+        # Start asynchronous connection / disconnection via QThread
+        self._vpn_thread = VpnToggleThread(self.data_bridge, checked)
+        self._vpn_thread.finished_signal.connect(self._on_vpn_finished)
+        self._vpn_thread.start()
+
+    def _on_vpn_reconnect(self, location: str):
+        """Called when the user changes country while VPN is ON."""
+        if self._vpn_thread and self._vpn_thread.isRunning():
+            log.warning("Vpn reconnect requested but thread is already running")
+            return
+
+        # Start connecting transition
+        self.vpn_card.setStatus("connecting")
+        if self.data_bridge and self.data_bridge._wifi_responder:
+            self.data_bridge._wifi_responder.vpn_status = "connecting"
+
+        # Start 12s timeout guard
+        self._vpn_timeout_timer.start(12000)
+
+        # Start asynchronous reconnection via QThread
+        self._vpn_thread = VpnToggleThread(self.data_bridge, enabled=True, country=location, reconnect=True)
+        self._vpn_thread.finished_signal.connect(self._on_vpn_finished)
+        self._vpn_thread.start()
+
+    @Slot(bool, str)
+    def _on_vpn_finished(self, success: bool, status: str):
+        """Called when the VpnToggleThread finishes execution."""
+        self._vpn_timeout_timer.stop()
+        log.info("VPN toggle task finished — success=%s, status=%s", success, status)
+        
+        # Ensure final state is set on the responder
+        if self.data_bridge and self.data_bridge._wifi_responder:
+            self.data_bridge._wifi_responder.vpn_status = status
+            
+        self.vpn_card.setStatus(status)
+
+    def _on_vpn_timeout(self):
+        """Called when the VPN connection phase exceeds the safety timeout."""
+        log.error("VPN toggle action TIMED OUT! Forcing UI state reset.")
+        
+        # Clean up the thread if running
+        if self._vpn_thread and self._vpn_thread.isRunning():
+            try:
+                self._vpn_thread.terminate()
+                self._vpn_thread.wait(2000) # brief wait
+            except Exception as exc:
+                log.warning("Failed to terminate VPN thread on timeout: %s", exc)
+
+        # Re-sync final status from the backend if possible, else default to disconnected
+        status = "disconnected"
+        if self.data_bridge and self.data_bridge._wifi_responder:
+            # Force status check
+            self.data_bridge._wifi_responder.vpn_status = "disconnected"
+            status = self.data_bridge._wifi_responder.vpn_status
+            
+        self.vpn_card.setStatus(status)
+        
+        QMessageBox.warning(self, "VPN Connection Timeout", 
+                            "VPN connection attempt timed out. "
+                            "Please check your OpenVPN client config or system connection.")
 
     # ── DNS dropdown handler ──
 
@@ -329,17 +692,22 @@ class DashboardPage(QWidget):
         """Called when the user selects a DNS provider from the dropdown."""
         if not self.data_bridge:
             return
-        t = _t()
-        if provider_name == "System Default":
-            self._dns_status_lbl.setText("Restoring DHCP…")
-            self._dns_status_lbl.setStyleSheet(f"color: {t['warning']};")
-            self.data_bridge.restore_default_dns()
-        else:
-            providers = getattr(config, "ENCRYPTED_DNS_PROVIDERS", {})
-            desc = providers.get(provider_name, {}).get("description", "")
-            self._dns_status_lbl.setText(f"Switching to {provider_name}…")
-            self._dns_status_lbl.setStyleSheet(f"color: {t['warning']};")
-            self.data_bridge.switch_dns_provider(provider_name)
+        if self._dns_thread and self._dns_thread.isRunning():
+            log.warning("Dns switch requested but thread is already running")
+            return
+
+        self.dns_card.set_loading(True)
+
+        self._dns_thread = DnsToggleThread(self.data_bridge, provider_name)
+        self._dns_thread.finished_signal.connect(self._on_dns_finished)
+        self._dns_thread.start()
+
+    @Slot(bool, str)
+    def _on_dns_finished(self, success: bool, provider_name: str):
+        """Called when the DnsToggleThread finishes execution."""
+        log.info("DNS switch task finished — success=%s, active=%s", success, provider_name)
+        self.dns_card.set_loading(False)
+        self.dns_card.setProviderSilently(provider_name)
 
     # ── Live data refresh (called by App.on_refresh) ──
 
@@ -358,45 +726,24 @@ class DashboardPage(QWidget):
             f"{n} threat{'s' if n != 1 else ''} detected" if n else "No threats detected",
             _t()["danger"] if n else _t()["accent"])
 
-        self.scan_card.update_value("Just now")
-
-        # ── Sync VPN toggle with backend state ──
+        # ── Sync VPN toggle and country with backend state ──
         try:
-            vpn_active = self.data_bridge.is_vpn_active() if self.data_bridge else False
-            t = _t()
-            # Only update toggle if it doesn't match (avoid signal loops)
-            if self._vpn_toggle.isChecked() != vpn_active:
-                self._vpn_toggle.blockSignals(True)
-                self._vpn_toggle.setChecked(vpn_active)
-                self._vpn_toggle.blockSignals(False)
-            if vpn_active:
-                self._vpn_status_lbl.setText("Active — Protected")
-                self._vpn_status_lbl.setStyleSheet(f"color: {t['accent']};")
-            else:
-                self._vpn_status_lbl.setText("Inactive")
-                self._vpn_status_lbl.setStyleSheet(f"color: {t['text_secondary']};")
+            if self.data_bridge:
+                # Only sync card status from backend if the async thread is not running
+                if not (self._vpn_thread and self._vpn_thread.isRunning()):
+                    vpn_status = self.data_bridge.get_vpn_status()
+                    self.vpn_card.setStatus(vpn_status)
+                vpn_country = self.data_bridge.get_vpn_country()
+                self.vpn_card.setCountrySilently(vpn_country)
         except Exception:
             pass
 
         # ── Sync DNS dropdown with backend state ──
         try:
             if self.data_bridge:
-                active_dns = self.data_bridge.get_active_dns_provider()
-                t = _t()
-                # Update combo without triggering signal
-                if self._dns_combo.currentText() != active_dns:
-                    self._dns_combo.blockSignals(True)
-                    idx = self._dns_combo.findText(active_dns)
-                    if idx >= 0:
-                        self._dns_combo.setCurrentIndex(idx)
-                    self._dns_combo.blockSignals(False)
-                # Update status label
-                if active_dns == "System Default":
-                    self._dns_status_lbl.setText("System Default")
-                    self._dns_status_lbl.setStyleSheet(f"color: {t['text_secondary']};")
-                else:
-                    self._dns_status_lbl.setText(f"{active_dns} · Encrypted (DoH)")
-                    self._dns_status_lbl.setStyleSheet(f"color: {t['accent']};")
+                if not (self._dns_thread and self._dns_thread.isRunning()):
+                    active_dns = self.data_bridge.get_active_dns_provider()
+                    self.dns_card.setProviderSilently(active_dns)
         except Exception:
             pass
 
@@ -411,7 +758,7 @@ class DashboardPage(QWidget):
         behavioral_report = reports.get("behavioral_report")
         wifi_report = reports.get("wifi_report")
 
-        # ── Recommended actions (prefer monitor-provided list, otherwise derive from score)
+        # ── Recommended actions (fed from HardeningAdvisor)
         try:
             # clear previous items
             while self._recommended_layout.count():
@@ -420,93 +767,85 @@ class DashboardPage(QWidget):
                 if w is not None:
                     w.deleteLater()
 
-            recs = reports.get("recommended_actions")
-            if not recs:
-                # fallback: derive from score
-                recs = []
-                if score.web_score >= 60:
-                    recs.append({"icon": "🛡️", "title": "Update Firewall Rules", "message": "Web module threshold met", "tag": "REVIEW"})
-                if score.wifi_score >= 60:
-                    recs.append({"icon": "🚫", "title": "Block IP Range", "message": "Suspicious behaviour detected", "tag": "REVIEW"})
-                if score.unified_score >= 80:
-                    recs.append({"icon": "🔑", "title": "Rotate API Keys", "message": "Scheduled rotation due", "tag": "APPLY"})
+            from modules.hardening import HardeningAdvisor
+            advisor = HardeningAdvisor()
+            hardening_recs = advisor.analyze(
+                wifi_report=wifi_report,
+                behavioral_report=behavioral_report,
+                web_report=web_report,
+                threat_score=score
+            )
+            # Sort by priority
+            hardening_recs = advisor.get_priority_actions(hardening_recs)
 
-            if not recs:
+            if not hardening_recs:
                 self._recommended_layout.addWidget(self._no_recs_lbl)
             else:
-                # rec may be list of tuples (legacy) or dicts from monitor
-                for r in recs:
-                    if isinstance(r, dict):
-                        icon = r.get("icon", "")
-                        title = r.get("title", "")
-                        sub = r.get("message", "")
-                        tag = r.get("tag", "")
-                    else:
-                        # legacy tuple format
-                        icon, title, sub, tag = r
+                cat_icons = {
+                    "WIFI": "📶",
+                    "PROCESSES": "⚙️",
+                    "BROWSER": "🌐",
+                    "SYSTEM": "🖥️"
+                }
+                for rec in hardening_recs:
+                    icon = cat_icons.get(rec.category.upper(), "🛡️")
+                    title = rec.title
+                    sub = rec.description
+                    tag = rec.priority  # E.g., IMMEDIATE, HIGH, MEDIUM, LOW
                     self._recommended_layout.addWidget(ActionCard(self._recommended_widget, icon, title, sub, tag))
-        except Exception:
+        except Exception as exc:
+            log.error("Failed to generate recommendations: %s", exc)
             try:
                 self._recommended_layout.addWidget(self._no_recs_lbl)
             except Exception:
                 pass
 
-        # Actions taken (from auto-responder): show/hide based on availability
-        actions_taken = reports.get("actions_taken")
-        if actions_taken is not None:
-            self.actions_card.show()
-            self.actions_card.update_value(actions_taken)
-        else:
-            self.actions_card.hide()
+        # ── Active threats table ──
+        try:
+            # Clear previous items
+            while self._threats_rows_lay.count():
+                item = self._threats_rows_lay.takeAt(0)
+                w = item.widget()
+                if w is not None:
+                    w.deleteLater()
 
-        # Helper to extract list-like fields from dataclass or dict
-        def _pluck_list(obj, key):
-            if obj is None:
-                return []
-            if isinstance(obj, dict):
-                return obj.get(key, []) or []
-            return getattr(obj, key, []) or []
+            active_threats = getattr(score, "active_threats", [])
+            if not active_threats:
+                self._threats_rows_lay.addWidget(self._no_threats_lbl)
+            else:
+                for threat in active_threats:
+                    threat_str = str(threat)
+                    
+                    # Determine Module
+                    if "anomalous process" in threat_str.lower() or "behavior" in threat_str.lower():
+                        module = "Behaviour"
+                        report_severity = getattr(behavioral_report, "severity", "WARNING") if behavioral_report else "WARNING"
+                    elif "tracker" in threat_str.lower() or "fingerprint" in threat_str.lower():
+                        module = "Web"
+                        report_severity = getattr(web_report, "severity", "WARNING") if web_report else "WARNING"
+                    else:
+                        module = "WiFi"
+                        report_severity = getattr(wifi_report, "severity", "WARNING") if wifi_report else "WARNING"
 
-        # Blocked requests (sum of hit_count)
-        if web_report:
-            hits = _pluck_list(web_report, "tracker_hits")
-            try:
-                blocked_count = sum(getattr(h, "hit_count", h.get("hit_count", 1)) if hasattr(h, "__dict__") or isinstance(h, dict) else 1 for h in hits)
-            except Exception:
-                blocked_count = 0
-            self._mini_blocked.set_visible(True)
-            self._mini_blocked.update_value(f"{blocked_count:,}")
-        else:
-            self._mini_blocked.set_visible(False)
-
-        # Suspicious processes
-        if behavioral_report:
-            procs = _pluck_list(behavioral_report, "anomalous_processes")
-            self._mini_suspicious.set_visible(True)
-            self._mini_suspicious.update_value(str(len(procs)))
-        else:
-            self._mini_suspicious.set_visible(False)
-
-        # Networks scanned
-        if wifi_report:
-            nets = _pluck_list(wifi_report, "nearby_networks")
-            self._mini_networks.set_visible(True)
-            self._mini_networks.update_value(str(len(nets)))
-        else:
-            self._mini_networks.set_visible(False)
-
-        # Data sent (sum of data_volume_kb -> GB)
-        if web_report:
-            hits = _pluck_list(web_report, "tracker_hits")
-            try:
-                total_kb = sum(getattr(h, "data_volume_kb", h.get("data_volume_kb", 0.0)) if hasattr(h, "__dict__") or isinstance(h, dict) else 0.0 for h in hits)
-            except Exception:
-                total_kb = 0.0
-            total_gb = total_kb / 1024.0 / 1024.0
-            self._mini_data_sent.set_visible(True)
-            self._mini_data_sent.update_value(f"{total_gb:.1f} GB")
-        else:
-            self._mini_data_sent.set_visible(False)
+                    # Determine Severity
+                    if "evil-twin" in threat_str.lower() or "critical" in threat_str.lower() or "unauthorized" in threat_str.lower():
+                        severity = "CRITICAL"
+                    else:
+                        # Use the report severity or map it
+                        severity = report_severity.upper()
+                        if severity not in ("CRITICAL", "HIGH", "WARNING", "INFO"):
+                            severity = "WARNING"
+                    
+                    self._threats_rows_lay.addWidget(table_row(
+                        self.threats_table_frame,
+                        [
+                            (150, module, "bold"),
+                            (710, threat_str),
+                            (120, severity, "pill")
+                        ]
+                    ))
+        except Exception as exc:
+            log.error("Failed to populate active threats: %s", exc)
 
         # Module bars
         def bar_color(v):
@@ -623,8 +962,14 @@ class WiFiSecurityPage(QWidget):
             r1g.setColumnStretch(c, 1)
         lay.addWidget(r1)
 
-        # ── Nearby Networks (dynamic) ──
-        self._net_card = GlassFrame(self)
+        # ── Middle Row: Nearby Networks (Left) & Info/Threats (Right) ──
+        r2 = QWidget()
+        r2_lay = QHBoxLayout(r2)
+        r2_lay.setContentsMargins(0, 0, 0, 15)
+        r2_lay.setSpacing(12)
+
+        # Left side: Nearby Networks
+        self._net_card = GlassFrame(r2)
         self._net_layout = QVBoxLayout(self._net_card)
         self._net_layout.setContentsMargins(0, 0, 0, 0)
         self._net_layout.setSpacing(0)
@@ -642,18 +987,14 @@ class WiFiSecurityPage(QWidget):
         self._net_layout.addWidget(placeholder)
         self._net_spacer = _vspacer(10)
         self._net_layout.addWidget(self._net_spacer)
-        lay.addWidget(self._net_card)
-        lay.addWidget(_vspacer(15))
+        r2_lay.addWidget(self._net_card, 3)
 
-        # ── Bottom: DNS Leak + Threats ──
-        r3 = QWidget()
-        r3g = QGridLayout(r3)
-        r3g.setContentsMargins(0, 0, 0, 15)
-        r3g.setSpacing(12)
-        r3g.setColumnStretch(0, 1)
-        r3g.setColumnStretch(1, 1)
+        # Right side: Vertical Stack for DNS Leak and Detected Threats
+        right_lay = QVBoxLayout()
+        right_lay.setContentsMargins(0, 0, 0, 0)
+        right_lay.setSpacing(12)
 
-        leak = GlassFrame(r3)
+        leak = GlassFrame(r2)
         leak_lay = QVBoxLayout(leak)
         leak_lay.setContentsMargins(22, 22, 22, 30)
         leak_lay.setSpacing(5)
@@ -680,10 +1021,10 @@ class WiFiSecurityPage(QWidget):
         leak_sub.setStyleSheet(f"color: {t['text_secondary']};")
         leak_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         leak_lay.addWidget(leak_sub)
-        r3g.addWidget(leak, 0, 0)
+        right_lay.addWidget(leak)
 
         # Detected threats card (dynamic)
-        self._threats_frame = GlassFrame(r3)
+        self._threats_frame = GlassFrame(r2)
         tc_lay = QVBoxLayout(self._threats_frame)
         tc_lay.setContentsMargins(0, 0, 0, 0)
         tc_lay.setSpacing(0)
@@ -697,8 +1038,11 @@ class WiFiSecurityPage(QWidget):
         self._threats_container.addWidget(no_threat)
         self._threat_widgets: list[QWidget] = [no_threat]
         tc_lay.addLayout(self._threats_container)
-        r3g.addWidget(self._threats_frame, 0, 1)
-        lay.addWidget(r3)
+        right_lay.addWidget(self._threats_frame)
+        right_lay.addStretch()
+
+        r2_lay.addLayout(right_lay, 2)
+        lay.addWidget(r2)
         lay.addStretch()
 
     def refresh(self, score, wifi_report):
@@ -907,8 +1251,6 @@ class BehaviourAnalysisPage(QWidget):
         self._susp_count_lbl.setFont(QFont("Segoe UI", 32, QFont.Weight.Bold))
         self._susp_count_lbl.setStyleSheet(f"color: {t['text_muted']};")
         sp_lay.addWidget(self._susp_count_lbl)
-        self._susp_link = ClickableLabel("VIEW FLAGGED LIST →", t["accent"])
-        sp_lay.addWidget(self._susp_link)
         r1g.addWidget(sp, 0, 1)
 
         # Anomalies detected card
@@ -1050,6 +1392,7 @@ class BehaviourAnalysisPage(QWidget):
         self._anom_container.addWidget(no_anom)
         self._anom_widgets: list[QWidget] = [no_anom]
         anom_lay.addLayout(self._anom_container)
+        anom_lay.addStretch()
         r2g.addWidget(self._anom_frame, 0, 1)
         lay.addWidget(r2)
 
@@ -1196,8 +1539,14 @@ class BehaviourAnalysisPage(QWidget):
         self._score_card.update_subtext(
             sev_sub.get(severity, ""), score_color(bscore))
 
+        # Count the number of processes visible in the table below (at most 8 shown)
+        visible_count = 0
+        if snapshot is not None:
+            processes = getattr(snapshot, "top_cpu_processes", []) if not isinstance(snapshot, dict) else snapshot.get("top_cpu_processes", [])
+            visible_count = min(len(processes), 8)
+
         # ── Suspicious processes count ──
-        n_susp = len(anomalous_procs)
+        n_susp = visible_count
         if n_susp == 0:
             self._susp_count_lbl.setText("0 flagged")
             self._susp_count_lbl.setStyleSheet(f"color: {t['accent']};")
@@ -2078,7 +2427,7 @@ class AllActionsPage(QWidget):
         search.setFixedSize(200, 32)
         search.setFont(QFont("Segoe UI", 11))
         fbl.addWidget(search)
-        mod_filter = QComboBox()
+        mod_filter = SentinelComboBox()
         mod_filter.addItems(["All Modules", "System", "WiFi",
                              "Web Tracking", "Behaviour"])
         mod_filter.setFont(QFont("Segoe UI", 11))
@@ -2227,7 +2576,7 @@ class NetworkLogsPage(QWidget):
         fb = QWidget()
         fbl = QHBoxLayout(fb)
         fbl.setContentsMargins(0, 0, 0, 15)
-        date_cb = QComboBox()
+        date_cb = SentinelComboBox()
         date_cb.addItems(["Last 7 days", "Last 24 hours", "Last 30 days",
                           "All time"])
         date_cb.setFont(QFont("Segoe UI", 11))
@@ -2422,7 +2771,7 @@ class SettingsPage(QWidget):
         tfl.setContentsMargins(40, 0, 40, 12)
         tfl.addWidget(self._bold_label("Theme"))
         tfl.addStretch()
-        self.theme_cb = QComboBox()
+        self.theme_cb = SentinelComboBox()
         self.theme_cb.addItems(["Light", "Dark", "System"])
         self.theme_cb.setFont(QFont("Segoe UI", 11))
         self.theme_cb.setFixedWidth(120)
@@ -2459,48 +2808,24 @@ class SettingsPage(QWidget):
         # ── AUTOMATION ──
         card_lay.addWidget(self._section_label(card, "AUTOMATION PREFERENCES"))
         card_lay.addWidget(self._sub_header("Automatic Actions"))
-        for title_, sub_, on in [
-            ("Auto-block high-risk processes",
-             "Sentinel will kill suspicious threads instantly", True),
-            ("Auto-disconnect suspicious WiFi",
-             "Sever connection if SSL pinning fails", False),
-            ("Auto-clear tracking cookies daily",
-             "Remove browser fingerprints at midnight", True),
-            ("Quarantine flagged files automatically",
-             "Move threat vectors to sandbox isolation", False),
-        ]:
-            card_lay.addWidget(_toggle_row(card, title_, sub_, on))
-
-        card_lay.addWidget(_vspacer(15))
-        card_lay.addWidget(self._sub_header("Alert Me When"))
-        for title_, sub_, on in [
-            ("New device joins my network", None, True),
-            ("Behaviour score exceeds 70", None, True),
-            ("High-risk tracker detected", None, False),
-            ("Unusual data upload detected", None, True),
-        ]:
-            card_lay.addWidget(_toggle_row(card, title_, sub_, on))
-
-        card_lay.addWidget(_vspacer(15))
-        never_h = QLabel("Never Do")
-        never_h.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
-        never_h.setStyleSheet(f"color: {t['danger']};")
-        never_h.setContentsMargins(40, 0, 0, 10)
-        card_lay.addWidget(never_h)
-        for title_, sub_, on in [
-            ("Send data to third parties", None, False),
-            ("Auto-delete user files", None, False),
-            ("Share location data", None, False),
-        ]:
-            card_lay.addWidget(_toggle_row(card, title_, sub_, on,
-                                           enabled=False))
-
-        lock_note = QLabel("These settings are hard-locked by the "
-                           "Sentinel Privacy Manifest.")
-        lock_note.setFont(QFont("Segoe UI", 9))
-        lock_note.setStyleSheet(f"color: {t['text_muted']};")
-        lock_note.setContentsMargins(40, 5, 0, 15)
-        card_lay.addWidget(lock_note)
+        
+        auto_vpn_val = getattr(config, "AUTO_CONNECT_VPN", True)
+        auto_dns_val = getattr(config, "AUTO_DNS_SWITCH_ENABLED", True)
+        
+        card_lay.addWidget(_toggle_row(
+            card, 
+            "Auto connect VPN",
+            "Automatically connect to VPN when threat score >= 50 or on Wi-Fi threat breach",
+            value=auto_vpn_val,
+            callback=self._on_auto_vpn_toggle
+        ))
+        card_lay.addWidget(_toggle_row(
+            card, 
+            "Auto switch DNS",
+            "Automatically switch to secure DNS resolvers when threat score >= 50 or on Wi-Fi threat breach",
+            value=auto_dns_val,
+            callback=self._on_auto_dns_toggle
+        ))
         card_lay.addWidget(self._divider(card))
 
         # ── NOTIFICATIONS ──
@@ -2611,6 +2936,20 @@ class SettingsPage(QWidget):
         if self.app_window:
             self.app_window.apply_full_theme()
 
+    def _on_auto_vpn_toggle(self, checked):
+        import config as cfg
+        cfg.AUTO_CONNECT_VPN = checked
+        if self.config_manager:
+            self.config_manager.set("AUTO_CONNECT_VPN", checked)
+
+    def _on_auto_dns_toggle(self, checked):
+        import config as cfg
+        cfg.AUTO_DNS_SWITCH_ENABLED = checked
+        cfg.AUTO_ENABLE_DNS_PROTECTION = checked
+        if self.config_manager:
+            self.config_manager.set("AUTO_DNS_SWITCH_ENABLED", checked)
+            self.config_manager.set("AUTO_ENABLE_DNS_PROTECTION", checked)
+
     def _section_label(self, parent, text):
         t = _t()
         fr = QWidget(parent)
@@ -2658,7 +2997,7 @@ class SettingsPage(QWidget):
 # SHARED HELPERS
 # ═══════════════════════════════════════════════════════════════════════
 
-def _toggle_row(parent, title, subtitle=None, value=False, enabled=True):
+def _toggle_row(parent, title, subtitle=None, value=False, enabled=True, callback=None):
     t = _t()
     fr = QWidget(parent)
     hl = QHBoxLayout(fr)
@@ -2677,8 +3016,11 @@ def _toggle_row(parent, title, subtitle=None, value=False, enabled=True):
     hl.addLayout(vl)
     hl.addStretch()
     sw = ToggleSwitch(fr, checked=value, enabled=enabled)
+    if callback:
+        sw.toggled.connect(callback)
     hl.addWidget(sw)
     return fr
+
 
 
 def _alert_row(parent, time_str, desc, severity):

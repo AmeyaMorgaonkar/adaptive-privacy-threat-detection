@@ -36,6 +36,8 @@ data/*.log
 data/*.csv
 data/*.json
 data/*.jsonl
+data/logs/
+data/reports/
 !data/.gitkeep
 
 # Environment

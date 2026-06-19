@@ -193,7 +193,7 @@ def build_stylesheet() -> str:
         }}
 
         /* ── GlassFrame cards ── */
-        GlassFrame {{
+        QFrame#GlassFrame {{
             background-color: {bg_rgba};
             border: 1px solid {t['card_border']};
             border-radius: {radius}px;
@@ -227,9 +227,9 @@ def build_stylesheet() -> str:
         /* ── ComboBox ── */
         QComboBox {{
             background-color: {t['input_bg']};
-            border: 1px solid {t['input_border']};
+            border: 1px solid #232733;
             border-radius: 8px;
-            padding: 4px 12px;
+            padding: 4px 28px 4px 12px;
             color: {t['text_primary']};
             min-height: 28px;
         }}
@@ -237,8 +237,8 @@ def build_stylesheet() -> str:
             border-color: {t['accent']};
         }}
         QComboBox::drop-down {{
+            width: 0px;
             border: none;
-            width: 24px;
         }}
         QComboBox QAbstractItemView {{
             background-color: {t['card_bg']};

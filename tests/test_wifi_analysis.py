@@ -462,6 +462,13 @@ class TestRunAnalysis(unittest.TestCase):
 class TestWiFiResponder(unittest.TestCase):
     """Test WiFiResponder behaviour."""
 
+    def setUp(self):
+        self.patcher = patch("modules.wifi_responder.WiFiResponder._is_openvpn_running_system", return_value=False)
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+
     def _make_report(self, severity: str = "LOW", threats: list | None = None):
         return WiFiReport(
             timestamp="2026-01-01T00:00:00Z",
@@ -493,7 +500,7 @@ class TestWiFiResponder(unittest.TestCase):
 
         mock_log.assert_called_once()
         mock_alert.assert_called_once()
-        mock_vpn.assert_not_called()
+        mock_vpn.assert_called_once_with(state=True)
 
     @patch("modules.wifi_responder.WiFiResponder._apply_hardened_dns")
     @patch("modules.wifi_responder.WiFiResponder.toggle_vpn")
@@ -545,6 +552,11 @@ class TestWiFiResponder(unittest.TestCase):
         from modules.wifi_responder import WiFiResponder
 
         responder = WiFiResponder()
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        mock_proc.pid = 9999
+        mock_vpn.side_effect = lambda *args, **kwargs: setattr(responder, "_vpn_process", mock_proc)
+
         report = self._make_report("LOW", ["low threat"])
 
         activated = responder.evaluate_auto_protection(80.0, wifi_report=report)
@@ -575,6 +587,7 @@ class TestWiFiResponder(unittest.TestCase):
 
         responder = WiFiResponder()
         responder._os = "Linux"
+        responder._dns_manager._os = "Linux"
         responder._apply_hardened_dns()
 
         self.assertGreaterEqual(mock_run.call_count, 2)
@@ -585,15 +598,21 @@ class TestWiFiResponder(unittest.TestCase):
     def test_apply_hardened_dns_windows_uses_netsh(self, mock_run):
         from modules.wifi_responder import WiFiResponder
 
-        mock_run.return_value = MagicMock(returncode=0)
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout="Wi-Fi\n"),
+            MagicMock(returncode=0),
+            MagicMock(returncode=0),
+        ]
 
         responder = WiFiResponder()
         responder._os = "Windows"
+        responder._dns_manager._os = "Windows"
         responder._apply_hardened_dns()
 
         self.assertGreaterEqual(mock_run.call_count, 2)
-        first_cmd = mock_run.call_args_list[0].args[0]
-        self.assertIn("netsh", first_cmd)
+        # The first call is to Get-NetAdapter, the second is to netsh primary DNS
+        second_cmd = mock_run.call_args_list[1].args[0]
+        self.assertIn("netsh", second_cmd)
 
     def test_log_incident_creates_file(self):
         """log_incident should write a JSONL entry."""
@@ -638,5 +657,81 @@ class TestRawScoring(unittest.TestCase):
         self.assertLessEqual(score, 1.0)
 
 
+class TestAutoProtectionSwitches(unittest.TestCase):
+    """Test that Auto connect VPN and Auto switch DNS settings restrict automatic actions."""
+
+    def setUp(self):
+        self.patcher = patch("modules.wifi_responder.WiFiResponder._is_openvpn_running_system", return_value=False)
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def _make_report(self, severity: str = "LOW"):
+        return WiFiReport(
+            timestamp="2026-01-01T00:00:00Z",
+            connected_ssid="TestNet",
+            bssid="aa:bb:cc:dd:ee:ff",
+            encryption="WPA2",
+            signal_dbm=-60,
+            threats_detected=[],
+            severity=severity,
+            raw_score=0.5,
+        )
+
+    @patch("modules.wifi_responder.WiFiResponder._apply_hardened_dns")
+    @patch("modules.wifi_responder.WiFiResponder.toggle_vpn")
+    @patch("modules.wifi_responder.WiFiResponder.alert_user")
+    def test_protection_respects_vpn_and_dns_disabled(self, mock_alert, mock_vpn, mock_dns):
+        from modules.wifi_responder import WiFiResponder
+        
+        orig_vpn = getattr(config, "AUTO_CONNECT_VPN", True)
+        orig_dns = getattr(config, "AUTO_DNS_SWITCH_ENABLED", True)
+        try:
+            config.AUTO_CONNECT_VPN = False
+            config.AUTO_DNS_SWITCH_ENABLED = False
+            
+            responder = WiFiResponder()
+            report = self._make_report("LOW")
+            # Threat score of 80 should trigger protection, but both switches are off
+            activated = responder.evaluate_auto_protection(80.0, wifi_report=report)
+            
+            self.assertFalse(activated)
+            mock_vpn.assert_not_called()
+            mock_dns.assert_not_called()
+        finally:
+            config.AUTO_CONNECT_VPN = orig_vpn
+            config.AUTO_DNS_SWITCH_ENABLED = orig_dns
+
+    @patch("modules.wifi_responder.WiFiResponder._apply_hardened_dns")
+    @patch("modules.wifi_responder.WiFiResponder.toggle_vpn")
+    @patch("modules.wifi_responder.WiFiResponder.alert_user")
+    def test_protection_respects_vpn_enabled_dns_disabled(self, mock_alert, mock_vpn, mock_dns):
+        from modules.wifi_responder import WiFiResponder
+        
+        orig_vpn = getattr(config, "AUTO_CONNECT_VPN", True)
+        orig_dns = getattr(config, "AUTO_DNS_SWITCH_ENABLED", True)
+        try:
+            config.AUTO_CONNECT_VPN = True
+            config.AUTO_DNS_SWITCH_ENABLED = False
+            
+            responder = WiFiResponder()
+            mock_proc = MagicMock()
+            mock_proc.poll.return_value = None
+            mock_proc.pid = 9999
+            mock_vpn.side_effect = lambda *args, **kwargs: setattr(responder, "_vpn_process", mock_proc)
+            
+            report = self._make_report("LOW")
+            activated = responder.evaluate_auto_protection(80.0, wifi_report=report)
+            
+            self.assertTrue(activated)
+            mock_vpn.assert_called_once_with(state=True)
+            mock_dns.assert_not_called()
+        finally:
+            config.AUTO_CONNECT_VPN = orig_vpn
+            config.AUTO_DNS_SWITCH_ENABLED = orig_dns
+
+
 if __name__ == "__main__":
     unittest.main()
+

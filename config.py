@@ -192,6 +192,8 @@ ENCRYPTED_DNS_PROVIDERS = {
 }
 DEFAULT_DNS_PROVIDER = "Cloudflare"         # Used for auto-switching on threats
 AUTO_DNS_SWITCH_ENABLED = True              # Auto-switch DNS on threat detection
+AUTO_CONNECT_VPN = True                     # Auto-connect VPN on threat detection
+
 
 # Legacy alias — kept for backward compatibility with existing code
 HARDENED_DNS_PROVIDERS = {

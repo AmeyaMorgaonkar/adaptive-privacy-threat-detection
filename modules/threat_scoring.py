@@ -349,7 +349,7 @@ def _demo() -> None:
         print(f"  • {t}")
     print(f"Recommendations  : {len(score.recommendations)}")
     for r in score.recommendations:
-        print(f"  → {r}")
+        print(f"  -> {r}")
     print(f"\nJSON:\n{score.to_json()[:600]}")
 
 
