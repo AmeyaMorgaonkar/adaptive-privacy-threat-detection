@@ -170,7 +170,9 @@ class ClickableLabel(QLabel):
 # ═══════════════════════════════════════════════════════════════════════
 
 def table_header(parent, columns):
-    """Column header row + divider."""
+    """Column header row + divider.
+    Each column: (width, text) or (width, text, alignment)
+    """
     t = _t()
     container = QWidget(parent)
     outer = QVBoxLayout(container)
@@ -179,11 +181,16 @@ def table_header(parent, columns):
 
     row = QHBoxLayout()
     row.setSpacing(5)
-    for width, text in columns:
+    for col in columns:
+        width = col[0]
+        text = col[1]
+        align = col[2] if len(col) > 2 else Qt.AlignmentFlag.AlignLeft
+        
         lbl = QLabel(text.upper())
         lbl.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
         lbl.setStyleSheet(f"color: {t['text_muted']};")
         lbl.setFixedWidth(width)
+        lbl.setAlignment(align | Qt.AlignmentFlag.AlignVCenter)
         row.addWidget(lbl)
     row.addStretch()
     outer.addLayout(row)
@@ -198,7 +205,7 @@ def table_header(parent, columns):
 
 
 class HoverRow(QWidget):
-    """Table data row with hover highlight."""
+    """Table data data row with hover highlight."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self._normal_bg = "transparent"
@@ -215,6 +222,7 @@ class HoverRow(QWidget):
 def table_row(parent, cells):
     """One data row with hover effect.
     Each cell: (width, text, style). style: normal|bold|light|pill|mono|trash
+    If style ends with "_center", it center-aligns the text.
     """
     t = _t()
     fr = HoverRow(parent)
@@ -226,10 +234,22 @@ def table_row(parent, cells):
     for item in cells:
         w, txt = item[0], item[1]
         style = item[2] if len(item) > 2 else "normal"
+        
+        align = Qt.AlignmentFlag.AlignLeft
+        if style.endswith("_center"):
+            style = style[:-7]
+            align = Qt.AlignmentFlag.AlignCenter
+
         if style == "pill":
-            p = PillLabel(txt, txt)
-            p.setFixedWidth(w)
-            lay.addWidget(p)
+            # Wrap the pill in a centered container of width w to prevent it from stretching
+            container = QWidget(fr)
+            container.setFixedWidth(w)
+            container.setStyleSheet("background: transparent; border: none;")
+            c_lay = QHBoxLayout(container)
+            c_lay.setContentsMargins(0, 0, 0, 0)
+            p = PillLabel(txt, txt, container)
+            c_lay.addWidget(p, alignment=Qt.AlignmentFlag.AlignCenter)
+            lay.addWidget(container)
         elif style == "trash":
             tl = QLabel("🗑️")
             tl.setFont(QFont("Segoe UI", 12))
@@ -250,6 +270,7 @@ def table_row(parent, cells):
             lbl.setFont(font)
             lbl.setStyleSheet(f"color: {col};")
             lbl.setFixedWidth(w)
+            lbl.setAlignment(align | Qt.AlignmentFlag.AlignVCenter)
             lay.addWidget(lbl)
     lay.addStretch()
     return fr
@@ -266,10 +287,10 @@ class ActionCard(QFrame):
     def __init__(self, parent, icon, title, subtitle, badge_text=None):
         super().__init__(parent)
         t = _t()
-        self._bg = t.get("row_hover", "#F9FAFB")
-        self._bg_hover = t.get("divider", "#E5E7EB")
+        self._bg = "transparent"
+        self._bg_hover = t.get("row_hover", "#F3F4F6")
         self.setStyleSheet(f"QFrame {{ background-color: {self._bg};"
-                           f" border-radius: 10px; border: none; }}")
+                           f" border-radius: 8px; border: none; }}")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(15, 14, 15, 14)
@@ -307,11 +328,11 @@ class ActionCard(QFrame):
 
     def enterEvent(self, event):
         self.setStyleSheet(f"QFrame {{ background-color: {self._bg_hover};"
-                           f" border-radius: 10px; border: none; }}")
+                           f" border-radius: 8px; border: none; }}")
 
     def leaveEvent(self, event):
         self.setStyleSheet(f"QFrame {{ background-color: {self._bg};"
-                           f" border-radius: 10px; border: none; }}")
+                           f" border-radius: 8px; border: none; }}")
 
     def mousePressEvent(self, event):
         self.clicked.emit()

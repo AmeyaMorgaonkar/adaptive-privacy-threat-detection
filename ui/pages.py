@@ -488,6 +488,7 @@ class DashboardPage(QWidget):
         
         # DNS Async Thread
         self._dns_thread = None
+        self._last_score_timestamp = None
         
         t = _t()
         lay = QVBoxLayout(self)
@@ -561,7 +562,7 @@ class DashboardPage(QWidget):
         # Dynamic recommended actions container (populated in refresh)
         self._recommended_widget = QWidget(ra_card)
         self._recommended_layout = QVBoxLayout(self._recommended_widget)
-        self._recommended_layout.setContentsMargins(0, 0, 0, 0)
+        self._recommended_layout.setContentsMargins(22, 0, 22, 15)
         self._recommended_layout.setSpacing(8)
         # initial placeholder
         self._no_recs_lbl = QLabel("✅ No recommended actions required.")
@@ -709,23 +710,8 @@ class DashboardPage(QWidget):
         self.dns_card.set_loading(False)
         self.dns_card.setProviderSilently(provider_name)
 
-    # ── Live data refresh (called by App.on_refresh) ──
-
-    def refresh(self, score):
-        """Update dashboard widgets with latest ThreatScore."""
-        if score is None:
-            return
-        tier_info = TIER_COLORS.get(score.tier, TIER_COLORS["Safe"])
-
-        self.score_card.update_value(int(score.unified_score), tier_info["fg"])
-        self.score_card.update_subtext(score.tier, tier_info["fg"])
-
-        n = len(score.active_threats)
-        self.threats_card.update_value(n, _t()["danger"] if n else _t()["accent"])
-        self.threats_card.update_subtext(
-            f"{n} threat{'s' if n != 1 else ''} detected" if n else "No threats detected",
-            _t()["danger"] if n else _t()["accent"])
-
+    def _sync_vpn_dns_status(self):
+        """Sync VPN toggle and DNS dropdown with backend state (lightweight)."""
         # ── Sync VPN toggle and country with backend state ──
         try:
             if self.data_bridge:
@@ -746,6 +732,30 @@ class DashboardPage(QWidget):
                     self.dns_card.setProviderSilently(active_dns)
         except Exception:
             pass
+
+    # ── Live data refresh (called by App.on_refresh) ──
+
+    def refresh(self, score):
+        """Update dashboard widgets with latest ThreatScore."""
+        if score is None:
+            return
+
+        self._sync_vpn_dns_status()
+
+        if self._last_score_timestamp == score.timestamp:
+            return
+        self._last_score_timestamp = score.timestamp
+
+        tier_info = TIER_COLORS.get(score.tier, TIER_COLORS["Safe"])
+
+        self.score_card.update_value(int(score.unified_score), tier_info["fg"])
+        self.score_card.update_subtext(score.tier, tier_info["fg"])
+
+        n = len(score.active_threats)
+        self.threats_card.update_value(n, _t()["danger"] if n else _t()["accent"])
+        self.threats_card.update_subtext(
+            f"{n} threat{'s' if n != 1 else ''} detected" if n else "No threats detected",
+            _t()["danger"] if n else _t()["accent"])
 
         # ── Live module reports (used for mini-stats and recommended actions)
         reports = {}
@@ -890,11 +900,6 @@ class WiFiSecurityPage(QWidget):
         t_left.addWidget(sub)
         trl.addLayout(t_left)
         trl.addStretch()
-        self._tier_pill = QLabel("● -- — Scanning…")
-        self._tier_pill.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-        self._tier_pill.setStyleSheet("background-color: #F3F4F6; color: #374151;"
-                                     " border-radius: 14px; padding: 6px 16px;")
-        trl.addWidget(self._tier_pill)
         lay.addWidget(tr)
 
         # ── Stats row ──
@@ -1085,13 +1090,6 @@ class WiFiSecurityPage(QWidget):
 
         # ── Tier pill ──
         wifi_score = score.wifi_score if score else 0
-        tier_text = score.tier if score else "Safe"
-        tier_info = TIER_COLORS.get(tier_text, TIER_COLORS["Safe"])
-        self._tier_pill.setText(f"● {int(wifi_score)} — {tier_text}")
-        self._tier_pill.setStyleSheet(
-            f"background-color: {tier_info['bg_tint']};"
-            f" color: {tier_info['text']};"
-            " border-radius: 14px; padding: 6px 16px;")
 
         # ── Connected network ──
         ssid = _rget("connected_ssid", "Unknown")
@@ -1215,11 +1213,6 @@ class BehaviourAnalysisPage(QWidget):
         t_left.addWidget(sub)
         trl.addLayout(t_left)
         trl.addStretch()
-        self._tier_pill = QLabel("● -- — Scanning…")
-        self._tier_pill.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-        self._tier_pill.setStyleSheet("background-color: #F3F4F6; color: #374151;"
-                                     " border-radius: 14px; padding: 6px 16px;")
-        trl.addWidget(self._tier_pill)
         lay.addWidget(tr)
 
         # ── Stats row ──
@@ -1396,50 +1389,6 @@ class BehaviourAnalysisPage(QWidget):
         r2g.addWidget(self._anom_frame, 0, 1)
         lay.addWidget(r2)
 
-        # ── Rules + Alerts ──
-        r3 = QWidget()
-        r3g = QGridLayout(r3)
-        r3g.setContentsMargins(0, 0, 0, 15)
-        r3g.setSpacing(12)
-        r3g.setColumnStretch(0, 1)
-        r3g.setColumnStretch(1, 1)
-
-        rules = GlassFrame(r3)
-        r_lay = QVBoxLayout(rules)
-        r_lay.setContentsMargins(0, 0, 0, 0)
-        r_lay.setSpacing(0)
-        r_lay.addWidget(section_header(rules, "Behaviour Rules", "EDIT ALL",
-                                       t["accent"]))
-        for title_, sub_, on in [
-            ("Alert on high CPU spike",
-             f"Trigger alert if single process exceeds {config.HIGH_CPU_PROCESS_THRESHOLD:.0f}%", True),
-            ("Flag unknown processes",
-             "Alert when processes not in the safe list are detected", True),
-            ("Process churn detection",
-             f"Alert on > {config.PROCESS_CHURN_THRESHOLD} new processes per interval", True),
-        ]:
-            r_lay.addWidget(_toggle_row(rules, title_, sub_, on))
-        r_lay.addWidget(_vspacer(15))
-        r3g.addWidget(rules, 0, 0)
-
-        # Recent alerts (dynamic)
-        alerts_frame = GlassFrame(r3)
-        alerts_lay = QVBoxLayout(alerts_frame)
-        alerts_lay.setContentsMargins(0, 0, 0, 0)
-        alerts_lay.setSpacing(0)
-        alerts_lay.addWidget(section_header(alerts_frame,
-                                            "Recent Behaviour Alerts"))
-        self._alerts_container = QVBoxLayout()
-        self._alerts_container.setContentsMargins(0, 0, 0, 0)
-        self._alerts_container.setSpacing(0)
-        no_alert = _alert_row(alerts_frame, "--:--:--",
-                              "Waiting for data…", "INFO")
-        self._alerts_container.addWidget(no_alert)
-        self._alert_widgets: list[QWidget] = [no_alert]
-        alerts_lay.addLayout(self._alerts_container)
-        alerts_lay.addWidget(_vspacer(10))
-        r3g.addWidget(alerts_frame, 0, 1)
-        lay.addWidget(r3)
         lay.addStretch()
 
     # ── Live data refresh ──────────────────────────────────────────
@@ -1506,25 +1455,7 @@ class BehaviourAnalysisPage(QWidget):
         raw = _rget("raw_score", 0.0)
         deviation = _rget("baseline_deviation", 0.0)
 
-        # ── Tier pill ──
-        tier_text = score.tier if score else "Safe"
-        tier_info = TIER_COLORS.get(tier_text, TIER_COLORS["Safe"])
-        sev_labels = {"LOW": "Safe", "MEDIUM": "Moderate Threat",
-                      "HIGH": "High Threat"}
-        self._tier_pill.setText(
-            f"● {int(bscore)} — {sev_labels.get(severity, severity)}")
-        if severity == "HIGH":
-            self._tier_pill.setStyleSheet(
-                "background-color: #FEE2E2; color: #991B1B;"
-                " border-radius: 14px; padding: 6px 16px;")
-        elif severity == "MEDIUM":
-            self._tier_pill.setStyleSheet(
-                "background-color: #FEF3C7; color: #92400E;"
-                " border-radius: 14px; padding: 6px 16px;")
-        else:
-            self._tier_pill.setStyleSheet(
-                "background-color: #D1FAE5; color: #065F46;"
-                " border-radius: 14px; padding: 6px 16px;")
+
 
         # ── Score card ──
         def score_color(v):
@@ -1703,32 +1634,7 @@ class BehaviourAnalysisPage(QWidget):
             self._anom_container.addWidget(ok)
             self._anom_widgets.append(ok)
 
-        # ── Recent alerts (from anomalies) ──
-        for w in self._alert_widgets:
-            self._alerts_container.removeWidget(w)
-            w.deleteLater()
-        self._alert_widgets.clear()
-
-        if anomalies:
-            now_str = datetime.now().strftime("%H:%M:%S")
-            for anom in anomalies[:5]:
-                if isinstance(anom, dict):
-                    adesc = anom.get("description", "")
-                    asev = anom.get("severity", "LOW")
-                else:
-                    adesc = getattr(anom, "description", "")
-                    asev = getattr(anom, "severity", "LOW")
-
-                sev_map = {"LOW": "INFO", "MEDIUM": "WARNING", "HIGH": "CRITICAL"}
-                row = _alert_row(self, now_str, adesc, sev_map.get(asev, "INFO"))
-                self._alerts_container.addWidget(row)
-                self._alert_widgets.append(row)
-        else:
-            now_str = datetime.now().strftime("%H:%M:%S")
-            ok_row = _alert_row(self, now_str,
-                                "No behavioural anomalies detected", "INFO")
-            self._alerts_container.addWidget(ok_row)
-            self._alert_widgets.append(ok_row)
+        pass
 
 
 class TimelineCanvas(QWidget):
@@ -1806,11 +1712,6 @@ class WebTrackingPage(QWidget):
         t_left.addWidget(sub)
         trl.addLayout(t_left)
         trl.addStretch()
-        self._tier_pill = QLabel("● -- — Scanning…")
-        self._tier_pill.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-        self._tier_pill.setStyleSheet("background-color: #F3F4F6; color: #374151;"
-                                     " border-radius: 14px; padding: 6px 16px;")
-        trl.addWidget(self._tier_pill)
         lay.addWidget(tr)
 
         # ── Stats row ──
@@ -1850,8 +1751,10 @@ class WebTrackingPage(QWidget):
         dl.addWidget(section_header(self._dom_card, "Top Tracking Domains Detected",
                                     "Live data"))
         self._dom_header = table_header(self._dom_card,
-                                         [(200, "Domain"), (120, "Category"),
-                                          (80, "Score"), (120, "Severity")])
+                                         [(200, "Domain"),
+                                          (120, "Category", Qt.AlignmentFlag.AlignCenter),
+                                          (80, "Score", Qt.AlignmentFlag.AlignCenter),
+                                          (120, "Severity", Qt.AlignmentFlag.AlignCenter)])
         dl.addWidget(self._dom_header)
         self._dom_rows: list[QWidget] = []
         placeholder = QLabel("    Waiting for first scan…")
@@ -1860,8 +1763,7 @@ class WebTrackingPage(QWidget):
         placeholder.setContentsMargins(22, 15, 22, 15)
         self._dom_rows.append(placeholder)
         dl.addWidget(placeholder)
-        self._dom_spacer = _vspacer(10)
-        dl.addWidget(self._dom_spacer)
+        dl.addStretch()
         r2g.addWidget(self._dom_card, 0, 0)
 
         # Category breakdown donut + legend (dynamic)
@@ -1947,6 +1849,7 @@ class WebTrackingPage(QWidget):
         self._fp_container.addWidget(no_fp)
         self._fp_widgets: list[QWidget] = [no_fp]
         fp_lay.addLayout(self._fp_container)
+        fp_lay.addStretch()
         r2bg.addWidget(fp_frame, 0, 1)
         lay.addWidget(r2b)
 
@@ -1973,6 +1876,7 @@ class WebTrackingPage(QWidget):
         self._offenders_container.addWidget(no_off)
         self._offender_widgets: list[QWidget] = [no_off]
         off_lay.addLayout(self._offenders_container)
+        off_lay.addStretch()
         r3g.addWidget(self._offenders_frame, 0, 0)
 
         # Recommended actions (dynamic)
@@ -1982,8 +1886,8 @@ class WebTrackingPage(QWidget):
         ral.setSpacing(0)
         ral.addWidget(section_header(ra, "Recommended Actions"))
         self._actions_container = QVBoxLayout()
-        self._actions_container.setContentsMargins(0, 0, 0, 0)
-        self._actions_container.setSpacing(0)
+        self._actions_container.setContentsMargins(22, 0, 22, 15)
+        self._actions_container.setSpacing(8)
         self._action_widgets: list[QWidget] = []
         # Default static actions
         a1 = ActionCard(ra, "🔏", "Enable Fingerprint Resistance",
@@ -1997,7 +1901,7 @@ class WebTrackingPage(QWidget):
         self._actions_container.addWidget(a3)
         self._action_widgets.extend([a1, a2, a3])
         ral.addLayout(self._actions_container)
-        ral.addWidget(_vspacer(10))
+        ral.addStretch()
         r3g.addWidget(ra, 0, 1)
         lay.addWidget(r3)
         lay.addStretch()
@@ -2059,22 +1963,7 @@ class WebTrackingPage(QWidget):
         top_offenders = _rget("top_offenders", [])
         fp_signals = _rget("fingerprint_signals", [])
 
-        # ── Tier pill ──
-        sev_labels = {"LOW": "Safe", "MEDIUM": "Moderate", "HIGH": "High Threat"}
-        self._tier_pill.setText(
-            f"● {int(web_score)} — {sev_labels.get(severity, severity)}")
-        if severity == "HIGH":
-            self._tier_pill.setStyleSheet(
-                "background-color: #FEE2E2; color: #991B1B;"
-                " border-radius: 14px; padding: 6px 16px;")
-        elif severity == "MEDIUM":
-            self._tier_pill.setStyleSheet(
-                "background-color: #FEF3C7; color: #92400E;"
-                " border-radius: 14px; padding: 6px 16px;")
-        else:
-            self._tier_pill.setStyleSheet(
-                "background-color: #D1FAE5; color: #065F46;"
-                " border-radius: 14px; padding: 6px 16px;")
+
 
         # ── Stat cards ──
         def _score_color(v):
@@ -2118,7 +2007,7 @@ class WebTrackingPage(QWidget):
         self._dom_rows.clear()
 
         if tracker_hits:
-            insert_idx = dom_layout.indexOf(self._dom_spacer)
+            insert_idx = 2
             # Sort by individual_score descending
             sorted_hits = sorted(tracker_hits,
                                   key=lambda h: getattr(h, "individual_score", 0),
@@ -2131,7 +2020,7 @@ class WebTrackingPage(QWidget):
                 row = table_row(self._dom_card,
                                 [(200, domain, "bold"),
                                  (120, cat.upper(), "pill"),
-                                 (80, f"{ind_score:.0f}"),
+                                 (80, f"{ind_score:.0f}", "normal_center"),
                                  (120, sev, "pill")])
                 self._dom_rows.append(row)
                 dom_layout.insertWidget(insert_idx, row)
@@ -2142,8 +2031,7 @@ class WebTrackingPage(QWidget):
             placeholder.setStyleSheet(f"color: {t['accent']};")
             placeholder.setContentsMargins(22, 15, 22, 15)
             self._dom_rows.append(placeholder)
-            insert_idx = dom_layout.indexOf(self._dom_spacer)
-            dom_layout.insertWidget(insert_idx, placeholder)
+            dom_layout.insertWidget(2, placeholder)
 
         # ── Category score bars ──
         def _bar_color(v):
@@ -2737,31 +2625,6 @@ class SettingsPage(QWidget):
         card_lay.setContentsMargins(0, 0, 0, 0)
         card_lay.setSpacing(0)
 
-        # ── PROFILE ──
-        card_lay.addWidget(self._section_label(card, "PROFILE"))
-        prof = QWidget(card)
-        pl = QHBoxLayout(prof)
-        pl.setContentsMargins(40, 0, 40, 25)
-        avatar = QLabel("👨🏻‍💼")
-        avatar.setFont(QFont("Segoe UI", 36))
-        pl.addWidget(avatar)
-        pl.addSpacing(18)
-        info = QVBoxLayout()
-        info.setSpacing(2)
-        name = QLabel("Alexander Sterling")
-        name.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
-        name.setStyleSheet(f"color: {t['text_primary']};")
-        info.addWidget(name)
-        email = QLabel("alex.sterling@sentinel-defense.io")
-        email.setFont(QFont("Segoe UI", 11))
-        email.setStyleSheet(f"color: {t['text_secondary']};")
-        info.addWidget(email)
-        pl.addLayout(info)
-        pl.addStretch()
-        pl.addWidget(accent_button("Edit Profile"))
-        card_lay.addWidget(prof)
-        card_lay.addWidget(self._divider(card))
-
         # ── APPEARANCE ──
         card_lay.addWidget(self._section_label(card, "APPEARANCE"))
 
@@ -2807,7 +2670,6 @@ class SettingsPage(QWidget):
 
         # ── AUTOMATION ──
         card_lay.addWidget(self._section_label(card, "AUTOMATION PREFERENCES"))
-        card_lay.addWidget(self._sub_header("Automatic Actions"))
         
         auto_vpn_val = getattr(config, "AUTO_CONNECT_VPN", True)
         auto_dns_val = getattr(config, "AUTO_DNS_SWITCH_ENABLED", True)
@@ -2826,96 +2688,9 @@ class SettingsPage(QWidget):
             value=auto_dns_val,
             callback=self._on_auto_dns_toggle
         ))
-        card_lay.addWidget(self._divider(card))
-
-        # ── NOTIFICATIONS ──
-        card_lay.addWidget(self._section_label(card, "NOTIFICATIONS"))
-        card_lay.addWidget(self._sub_header("Communication Channels"))
-        for ch in ["In-App Notifications", "Desktop Push Alerts",
-                   "Email Security Digests"]:
-            cfr = QWidget(card)
-            cfl = QHBoxLayout(cfr)
-            cfl.setContentsMargins(40, 4, 40, 4)
-            cb = QCheckBox(ch)
-            cb.setFont(QFont("Segoe UI", 11))
-            cb.setChecked(True)
-            cfl.addWidget(cb)
-            card_lay.addWidget(cfr)
-
-        card_lay.addWidget(_vspacer(15))
-        card_lay.addWidget(self._sub_header("Quiet hours"))
-        qh = QFrame(card)
-        qh.setStyleSheet(f"QFrame {{ background-color: {t['row_hover']};"
-                         " border-radius: 8px; border: none; }}")
-        qhl = QHBoxLayout(qh)
-        qhl.setContentsMargins(20, 15, 20, 15)
-        for label, val in [("START", "10:00 PM"), ("END", "07:00 AM")]:
-            vl = QVBoxLayout()
-            vl.setSpacing(2)
-            l = QLabel(label)
-            l.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
-            l.setStyleSheet(f"color: {t['text_muted']};")
-            vl.addWidget(l)
-            v = QLabel(val)
-            v.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
-            v.setStyleSheet(f"color: {t['text_primary']};")
-            vl.addWidget(v)
-            qhl.addLayout(vl)
-            qhl.addSpacing(40)
-        qhl.addStretch()
-        qh.setContentsMargins(40, 0, 40, 25)
-        card_lay.addWidget(qh)
-        card_lay.addWidget(self._divider(card))
-
-        # ── DANGER ZONE ──
-        dz = QFrame(card)
-        dz.setStyleSheet(f"QFrame {{ background-color: {t['danger_tint']};"
-                         " border-radius: 10px; border: none; }}")
-        dz_lay = QVBoxLayout(dz)
-        dz_lay.setContentsMargins(20, 20, 20, 20)
-        dz_t = QLabel("DANGER ZONE")
-        dz_t.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        dz_t.setStyleSheet(f"color: {t['danger']};")
-        dz_lay.addWidget(dz_t)
-        dz_lay.addSpacing(15)
-
-        for btn_text, desc_title, desc_sub in [
-            ("Log Out", "Log Out",
-             "Sign out of all active Sentinel instances."),
-            ("Delete Account", "Delete Account",
-             "Once deleted, your threat history, logs, and custom rules\n"
-             "will be permanently erased. Cannot be undone."),
-        ]:
-            row = QWidget(dz)
-            rl = QHBoxLayout(row)
-            rl.setContentsMargins(0, 0, 0, 10)
-            tv = QVBoxLayout()
-            tv.setSpacing(2)
-            dt = QLabel(desc_title)
-            dt.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
-            dt.setStyleSheet(f"color: {t['text_primary']};")
-            tv.addWidget(dt)
-            ds = QLabel(desc_sub)
-            ds.setFont(QFont("Segoe UI", 10))
-            ds.setStyleSheet(f"color: {t['text_secondary']};")
-            tv.addWidget(ds)
-            rl.addLayout(tv)
-            rl.addStretch()
-            rl.addWidget(danger_outline_button(btn_text))
-            dz_lay.addWidget(row)
-
-        dz.setContentsMargins(30, 10, 30, 30)
-        card_lay.addWidget(dz)
         card_lay.addWidget(_vspacer(20))
 
         lay.addWidget(card)
-
-        footer = QLabel("Build v2.4.12-secure  •  Sentinel Defense Systems")
-        footer.setFont(QFont("Segoe UI", 9))
-        footer.setStyleSheet(f"color: {t['text_muted']};")
-        footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer.setContentsMargins(0, 10, 0, 20)
-        lay.addWidget(footer)
         lay.addStretch()
 
     def _on_theme_change(self, value):

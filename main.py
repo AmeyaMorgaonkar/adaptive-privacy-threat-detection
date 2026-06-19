@@ -171,6 +171,7 @@ def monitor_loop(data_bridge: DataBridge, config_manager=None):
         log.error("First concurrent scan failed: %s", exc, exc_info=True)
 
     while True:
+        
         try:
             # Skip scanning if session is paused
             if not data_bridge.is_session_running():

@@ -87,14 +87,16 @@ class ReportPanel(QWidget):
         trl.addStretch()
 
         # Session controls
-        self._session_pill = QLabel("● Active — Monitoring")
-        self._session_pill.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-        self._session_pill.setStyleSheet(
-            "background-color: #D1FAE5; color: #065F46;"
-            " border-radius: 14px; padding: 6px 16px;")
-        trl.addWidget(self._session_pill)
-
-        self._toggle_btn = accent_button("⏸ Pause", width=100)
+        self._toggle_btn = accent_button("⏸ Pause", width=150)
+        self._toggle_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {t['accent']}; color: white;
+                border-radius: 8px; padding: 10px 22px; border: none;
+            }}
+            QPushButton:hover {{ background-color: {t['accent_hover']}; }}
+            QPushButton:pressed {{ background-color: #047857; }}
+        """)
+        self._toggle_btn.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
         self._toggle_btn.clicked.connect(self._toggle_session)
         trl.addWidget(self._toggle_btn)
 
@@ -119,8 +121,19 @@ class ReportPanel(QWidget):
         r1g.addWidget(self._recs_card, 0, 3)
         lay.addWidget(r1)
 
-        # ── Component scores ──
-        lay.addWidget(section_header(self, "Component Scores"))
+        # ── Side-by-side: Component Scores & Export Report ──
+        mid_row = QWidget()
+        mid_l = QHBoxLayout(mid_row)
+        mid_l.setContentsMargins(0, 0, 0, 0)
+        mid_l.setSpacing(20)
+
+        # Left Column: Component Scores
+        col_left = QWidget()
+        col_left_lay = QVBoxLayout(col_left)
+        col_left_lay.setContentsMargins(0, 0, 0, 0)
+        col_left_lay.setSpacing(0)
+        col_left_lay.addWidget(section_header(col_left, "Component Scores"))
+        
         r2 = QWidget()
         r2g = QGridLayout(r2)
         r2g.setContentsMargins(22, 0, 22, 15)
@@ -128,7 +141,70 @@ class ReportPanel(QWidget):
         self._wifi_score_lbl = self._score_row(r2g, 0, "🛜", "Wi-Fi Security")
         self._beh_score_lbl = self._score_row(r2g, 1, "⚙️", "Behaviour Analysis")
         self._web_score_lbl = self._score_row(r2g, 2, "🌐", "Web Tracking")
-        lay.addWidget(r2)
+        col_left_lay.addWidget(r2)
+        col_left_lay.addStretch()
+        mid_l.addWidget(col_left, 1)
+
+        # Vertical Separator Line
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setFrameShadow(QFrame.Shadow.Plain)
+        sep.setStyleSheet(f"background-color: {t.get('input_border', '#374151')}; width: 1px; max-width: 1px; border: none; margin-top: 50px; margin-bottom: 15px;")
+        mid_l.addWidget(sep)
+
+        # Right Column: Export controls
+        col_right = QWidget()
+        col_right_lay = QVBoxLayout(col_right)
+        col_right_lay.setContentsMargins(0, 0, 0, 0)
+        col_right_lay.setSpacing(0)
+        
+        # Centering stretch spacer at the top (higher weight to push down)
+        col_right_lay.addStretch(3)
+        
+        # Center-aligned Header
+        self._export_hdr = QLabel("Export Report")
+        self._export_hdr.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        self._export_hdr.setStyleSheet(f"color: {t['text_primary']};")
+        self._export_hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        col_right_lay.addWidget(self._export_hdr)
+        
+        # Spacing between header and buttons
+        col_right_lay.addSpacing(15)
+        
+        # Buttons Row (horizontally centered)
+        btn_row = QWidget()
+        btn_l = QHBoxLayout(btn_row)
+        btn_l.setContentsMargins(0, 0, 0, 0)
+        btn_l.setSpacing(12)
+        btn_l.addStretch()
+        
+        self._json_btn = accent_button("📄 Save JSON", width=160)
+        self._json_btn.clicked.connect(self._export_json)
+        btn_l.addWidget(self._json_btn)
+        
+        self._txt_btn = outline_button("📝 Save TXT", width=160)
+        self._txt_btn.clicked.connect(self._export_txt)
+        btn_l.addWidget(self._txt_btn)
+        
+        btn_l.addStretch()
+        col_right_lay.addWidget(btn_row)
+        
+        # Spacing between buttons and status
+        col_right_lay.addSpacing(10)
+        
+        # Status Label (horizontally centered)
+        self._export_status = QLabel("")
+        self._export_status.setFont(QFont("Segoe UI", 10))
+        self._export_status.setStyleSheet(f"color: {t['accent']};")
+        self._export_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        col_right_lay.addWidget(self._export_status)
+        
+        # Centering stretch spacer at the bottom
+        col_right_lay.addStretch(2)
+        
+        mid_l.addWidget(col_right, 1)
+
+        lay.addWidget(mid_row)
 
         # ── Hardening recommendations ──
         lay.addWidget(section_header(self, "Hardening Recommendations"))
@@ -142,25 +218,6 @@ class ReportPanel(QWidget):
         recs_w = QWidget()
         recs_w.setLayout(self._recs_container)
         lay.addWidget(recs_w)
-
-        # ── Export controls ──
-        lay.addWidget(section_header(self, "Export Report"))
-        exp = QWidget()
-        exp_l = QHBoxLayout(exp)
-        exp_l.setContentsMargins(22, 0, 22, 15)
-        exp_l.setSpacing(12)
-        self._json_btn = accent_button("📄 Save JSON", width=160)
-        self._json_btn.clicked.connect(self._export_json)
-        exp_l.addWidget(self._json_btn)
-        self._txt_btn = outline_button("📝 Save TXT", width=160)
-        self._txt_btn.clicked.connect(self._export_txt)
-        exp_l.addWidget(self._txt_btn)
-        exp_l.addStretch()
-        self._export_status = QLabel("")
-        self._export_status.setFont(QFont("Segoe UI", 10))
-        self._export_status.setStyleSheet(f"color: {t['accent']};")
-        exp_l.addWidget(self._export_status)
-        lay.addWidget(exp)
 
         # ── Report history ──
         lay.addWidget(section_header(self, "Report History"))
@@ -230,18 +287,10 @@ class ReportPanel(QWidget):
             hist = self.data_bridge.history()
             self._scans_card.update_value(str(len(hist)))
 
-            # Session pill
+            # Session controls
             if self.data_bridge.is_session_running():
-                self._session_pill.setText("● Active — Monitoring")
-                self._session_pill.setStyleSheet(
-                    "background-color: #D1FAE5; color: #065F46;"
-                    " border-radius: 14px; padding: 6px 16px;")
                 self._toggle_btn.setText("⏸ Pause")
             else:
-                self._session_pill.setText("● Paused")
-                self._session_pill.setStyleSheet(
-                    "background-color: #FEF3C7; color: #92400E;"
-                    " border-radius: 14px; padding: 6px 16px;")
                 self._toggle_btn.setText("▶ Resume")
 
         # Component scores

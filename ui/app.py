@@ -17,7 +17,7 @@ from ui.glass_frame import GlassFrame
 from ui.data_bridge import DataBridge
 from ui.pages import (
     DashboardPage, WiFiSecurityPage, BehaviourAnalysisPage,
-    WebTrackingPage, AllActionsPage, NetworkLogsPage, SettingsPage,
+    WebTrackingPage, SettingsPage,
 )
 from ui.report_panel import ReportPanel
 from utils.config_manager import ConfigManager
@@ -109,8 +109,7 @@ class Sidebar(QFrame):
         # ── Top Nav ──
         for name, icon in [("Dashboard", "⊞"), ("WiFi Security", "◉"),
                            ("Behaviour Analysis", "◎"),
-                           ("Web Tracking", "◈"), ("All Actions", "⚡"),
-                           ("Reports", "📊")]:
+                           ("Web Tracking", "◈")]:
             btn = NavButton(name, icon)
             btn.clicked.connect(lambda _, n=name: self.app_window.show_page(n))
             layout.addWidget(btn)
@@ -119,7 +118,7 @@ class Sidebar(QFrame):
         layout.addStretch()
 
         # ── Bottom Nav ──
-        for name, icon in [("Network Logs", "▣"), ("Settings", "⚙")]:
+        for name, icon in [("Reports", "📊"), ("Settings", "⚙")]:
             btn = NavButton(name, icon)
             btn.clicked.connect(lambda _, n=name: self.app_window.show_page(n))
             layout.addWidget(btn)
@@ -243,6 +242,7 @@ class App(QMainWindow):
         self.page_stack.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         scl.addWidget(self.page_stack)
+        scl.addStretch()
 
         self.scroll_area.setWidget(scroll_content)
         content_layout.addWidget(self.scroll_area)
@@ -270,10 +270,8 @@ class App(QMainWindow):
             self.page_stack, data_bridge=self.data_bridge)
         self.pages["Web Tracking"] = WebTrackingPage(self.page_stack,
                                                       data_bridge=self.data_bridge)
-        self.pages["All Actions"] = AllActionsPage(self.page_stack)
         self.pages["Reports"] = ReportPanel(self.page_stack,
                                             data_bridge=self.data_bridge)
-        self.pages["Network Logs"] = NetworkLogsPage(self.page_stack)
         self.pages["Settings"] = SettingsPage(
             self.page_stack,
             config_manager=self.config_manager,
