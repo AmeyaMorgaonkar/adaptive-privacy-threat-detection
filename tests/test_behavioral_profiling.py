@@ -229,6 +229,25 @@ class TestProcessInspector:
         result = self.inspector.list_processes()
         assert isinstance(result, list)
 
+    @patch("modules.process_inspector.psutil")
+    def test_system_idle_process_is_ignored(self, mock_psutil):
+        idle = MagicMock()
+        idle.info = {
+            "pid": 0,
+            "name": "System Idle Process",
+            "exe": "",
+            "cpu_percent": 99.9,
+            "memory_info": None,
+            "create_time": 0.0,
+            "username": "",
+        }
+        mock_psutil.process_iter.return_value = [idle]
+
+        processes = self.inspector.list_processes()
+
+        assert processes == []
+        assert self.inspector.flag_suspicious(processes) == []
+
 
 # =====================================================================
 #  3. Baseline Learning Tests

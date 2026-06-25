@@ -39,10 +39,12 @@ INCIDENT_LOG = config.DATA_DIR / "wifi_incidents.jsonl"
 class WiFiResponder:
     """Reacts to threshold breaches reported by WiFiAnalyzer."""
 
-    def __init__(self, config_manager=None) -> None:
+    def __init__(self, config_manager=None, data_bridge=None) -> None:
         self._os = platform.system()
         self._network_protection_enabled = False
         self._manual_override = False
+        self._data_bridge = data_bridge
+        self._last_notification_type: str | None = None
         self._vpn_process: subprocess.Popen | None = None
         
         import threading
@@ -179,6 +181,10 @@ class WiFiResponder:
         score_triggered = unified_score >= threshold
 
         if not (wifi_triggered or score_triggered):
+            if self._manual_override:
+                log.info("Threat cleared; resetting manual override")
+                self._manual_override = False
+            self._last_notification_type = None
             return False
 
         # Respect manual user override — don't re-enable if user turned off
@@ -593,6 +599,8 @@ class WiFiResponder:
                 log.debug("Network protection (DNS-only) already active; skipping (%s)", reason)
                 return
 
+        was_enabled = self._network_protection_enabled
+
         log.warning("Enabling network protection: %s", reason)
         
         if vpn_should_run:
@@ -617,10 +625,31 @@ class WiFiResponder:
             if is_auto:
                 self._manual_override = False
             log.info("Network protection enabled (VPN=%s, DNS=%s)", vpn_should_run, dns_should_run)
+            if is_auto and not was_enabled:
+                if self._last_notification_type != "success":
+                    self._last_notification_type = "success"
+                    if self._data_bridge:
+                        parts = []
+                        if vpn_should_run:
+                            parts.append("VPN connection started")
+                        if dns_should_run:
+                            parts.append("Secure DNS activated")
+                        msg = " & ".join(parts) if parts else "Protection active"
+                        self._data_bridge.push_notification(
+                            "Automatic Protection Enabled",
+                            f"{msg} successfully due to threat: {reason}."
+                        )
         else:
             log.warning(
                 "VPN did not start — network protection will retry next cycle"
             )
+            if is_auto and self._last_notification_type != "failure":
+                self._last_notification_type = "failure"
+                if self._data_bridge:
+                    self._data_bridge.push_notification(
+                        "Automatic Protection Failed",
+                        f"Failed to start automatic VPN protection for threat: {reason}. Please check OpenVPN settings."
+                    )
 
     def disable_network_protection(self) -> None:
         """Turn off VPN and mark as manually overridden.
@@ -632,6 +661,7 @@ class WiFiResponder:
         self.toggle_vpn(state=False)
         self._network_protection_enabled = False
         self._manual_override = True
+        self._last_notification_type = None
 
     @property
     def is_vpn_active(self) -> bool:

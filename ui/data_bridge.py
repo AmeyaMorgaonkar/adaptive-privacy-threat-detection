@@ -66,6 +66,9 @@ class DataBridge:
         self._wifi_responder = None
         self._wifi_responder_lock = threading.Lock()
 
+        # Thread-safe notification queue for main thread routing
+        self._notifications: queue.Queue[tuple[str, str]] = queue.Queue()
+
     # ── Producer API (called from background threads) ────────────────
 
     def push(self, score: ThreatScore) -> None:
@@ -384,4 +387,21 @@ class DataBridge:
             except Exception as exc:
                 log.error("DNS restore via UI failed: %s", exc)
                 return False
+
+    # ── Notification Queue ───────────────────────────────────────────
+
+    def push_notification(self, title: str, message: str) -> None:
+        """Enqueue a push notification to be displayed on the UI thread."""
+        self._notifications.put((title, message))
+
+    def get_pending_notifications(self) -> list[tuple[str, str]]:
+        """Drain and return all pending notifications."""
+        notifs = []
+        while not self._notifications.empty():
+            try:
+                notifs.append(self._notifications.get_nowait())
+            except queue.Empty:
+                break
+        return notifs
+
 

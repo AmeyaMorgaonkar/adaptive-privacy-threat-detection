@@ -33,6 +33,9 @@ OPENVPN_BINARY = r"C:\Program Files\OpenVPN\bin\openvpn.exe"
 HARDENED_DNS_SERVERS = ["1.1.1.1", "8.8.8.8"]
 AUTO_ENABLE_DNS_PROTECTION = True
 
+# ── Push Notifications ──────────────────────────────────────────────
+PUSH_NOTIFICATIONS_ENABLED = True     # OS-native notifications on auto VPN/DNS
+
 # ── Threat Scoring (Milestone 02) ───────────────────────────────────
 # Scoring weights (must sum to 1.0)
 SCORE_WEIGHT_WIFI = 0.35

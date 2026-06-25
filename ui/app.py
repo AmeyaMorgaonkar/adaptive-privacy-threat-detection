@@ -7,10 +7,10 @@ import sys
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame, QLabel,
     QHBoxLayout, QVBoxLayout, QPushButton, QScrollArea,
-    QStackedWidget, QSizePolicy,
+    QStackedWidget, QSizePolicy, QSystemTrayIcon,
 )
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QIcon
 
 from ui.theme import apply_theme, get_card_tokens, setup_fonts, build_stylesheet
 from ui.glass_frame import GlassFrame
@@ -192,6 +192,14 @@ class App(QMainWindow):
         self.config_manager = config_manager or ConfigManager()
         self._current_page = "Dashboard"
 
+        # Apply window icon and system tray icon
+        icon_path = str(config.BASE_DIR / "assets" / "logo.ico")
+        self.setWindowIcon(QIcon(icon_path))
+        self.tray_icon = QSystemTrayIcon(self)
+        self.tray_icon.setIcon(QIcon(icon_path))
+        self.tray_icon.setToolTip("Sentinel Security Dashboard")
+        self.tray_icon.show()
+
         # Apply initial theme
         apply_theme()
         setup_fonts()
@@ -305,6 +313,13 @@ class App(QMainWindow):
 
     def _on_refresh(self):
         """Polls DataBridge every tick, updates live pages."""
+        # Process any pending notifications on the UI thread
+        notifs = self.data_bridge.get_pending_notifications()
+        if notifs:
+            from utils.notifier import show_notification
+            for title, msg in notifs:
+                show_notification(title, msg)
+
         score = self.data_bridge.latest()
         if score and "Dashboard" in self.pages:
             self.pages["Dashboard"].refresh(score)

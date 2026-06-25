@@ -636,6 +636,59 @@ class TestWiFiResponder(unittest.TestCase):
         self.assertEqual(entry["connected_ssid"], "TestNet")
         self.assertIn("logged_at", entry)
 
+    def test_auto_protection_notifications(self):
+        """Test success and failure notifications during auto protection."""
+        from modules.wifi_responder import WiFiResponder
+        from ui.data_bridge import DataBridge
+
+        data_bridge = DataBridge()
+        responder = WiFiResponder(data_bridge=data_bridge)
+
+        # Mock VPN status
+        with patch.object(WiFiResponder, "toggle_vpn") as mock_vpn, \
+             patch.object(WiFiResponder, "_apply_hardened_dns") as mock_dns:
+            
+            # Setup mock VPN success
+            mock_proc = MagicMock()
+            mock_proc.poll.return_value = None
+            responder._vpn_process = mock_proc
+            
+            # Trigger auto-protection
+            responder._enable_network_protection(reason="High threat score", is_auto=True)
+            
+            # Verify success notification is pushed
+            notifs = data_bridge.get_pending_notifications()
+            self.assertEqual(len(notifs), 1)
+            self.assertIn("Automatic Protection Enabled", notifs[0][0])
+            self.assertIn("High threat score", notifs[0][1])
+
+            # Trigger again while already enabled - no new notification should fire
+            responder._enable_network_protection(reason="High threat score", is_auto=True)
+            notifs = data_bridge.get_pending_notifications()
+            self.assertEqual(len(notifs), 0)
+
+            # Manually disable
+            responder.disable_network_protection()
+            self.assertIsNone(responder._last_notification_type)
+
+            # Setup mock VPN failure
+            responder._vpn_process = None
+            from unittest.mock import PropertyMock
+            with patch("modules.wifi_responder.WiFiResponder.vpn_status", new_callable=PropertyMock) as mock_status:
+                mock_status.return_value = "disconnected"
+                responder._enable_network_protection(reason="Rogue AP detected", is_auto=True)
+                
+                # Verify failure notification is pushed
+                notifs = data_bridge.get_pending_notifications()
+                self.assertEqual(len(notifs), 1)
+                self.assertIn("Automatic Protection Failed", notifs[0][0])
+                self.assertIn("Rogue AP detected", notifs[0][1])
+
+                # Trigger again while failing - no new failure notification should fire
+                responder._enable_network_protection(reason="Rogue AP detected", is_auto=True)
+                notifs = data_bridge.get_pending_notifications()
+                self.assertEqual(len(notifs), 0)
+
 
 class TestRawScoring(unittest.TestCase):
     """Test the raw score computation."""

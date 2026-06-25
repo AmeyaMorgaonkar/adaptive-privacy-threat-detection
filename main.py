@@ -1,5 +1,3 @@
-"""Entry point — launches the PySide6 desktop application with real module data."""
-
 import threading
 import time
 from logger import get_logger
@@ -141,7 +139,7 @@ def monitor_loop(data_bridge: DataBridge, config_manager=None):
     analyzer = WiFiAnalyzer()
     scorer = ThreatScorer()
     responder = AutoResponder()
-    wifi_responder = WiFiResponder(config_manager=config_manager)
+    wifi_responder = WiFiResponder(config_manager=config_manager, data_bridge=data_bridge)
     profiler = BehavioralProfiler()
     web_monitor = WebTrackerMonitor()
 
@@ -247,6 +245,16 @@ def monitor_loop(data_bridge: DataBridge, config_manager=None):
 
 def main() -> None:
     log.info("Starting application")
+
+    # Set explicit AppUserModelID on Windows so notifications/taskbar group correctly
+    import platform
+    if platform.system() == "Windows":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Sentinel Security")
+            log.info("Set process AppUserModelID to Sentinel Security")
+        except Exception as exc:
+            log.warning("Failed to set Windows AppUserModelID: %s", exc)
 
     try:
         from ui.app import run

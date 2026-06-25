@@ -122,14 +122,18 @@ class TestThreatScorerCompute:
     def test_all_zero_scores(self):
         scorer = ThreatScorer()
         score = scorer.compute()
-        assert score.unified_score == 0.0
+        assert score.unified_score == 5.0
         assert score.tier == "Safe"
 
     def test_wifi_only(self):
         scorer = ThreatScorer()
         wifi = _make_wifi_report(raw_score=0.8)  # → 80 out of 100
         score = scorer.compute(wifi_report=wifi)
-        expected = 80.0 * config.SCORE_WEIGHT_WIFI
+        expected = (
+            80.0 * config.SCORE_WEIGHT_WIFI
+            + 5.0 * config.SCORE_WEIGHT_BEHAVIORAL
+            + 5.0 * config.SCORE_WEIGHT_WEB
+        )
         assert score.wifi_score == 80.0
         assert score.unified_score == pytest.approx(expected, abs=0.1)
 
@@ -137,7 +141,11 @@ class TestThreatScorerCompute:
         scorer = ThreatScorer()
         beh = _make_behavioral_report(raw_score=0.6)  # → 60
         score = scorer.compute(behavioral_report=beh)
-        expected = 60.0 * config.SCORE_WEIGHT_BEHAVIORAL
+        expected = (
+            5.0 * config.SCORE_WEIGHT_WIFI
+            + 60.0 * config.SCORE_WEIGHT_BEHAVIORAL
+            + 5.0 * config.SCORE_WEIGHT_WEB
+        )
         assert score.behavioral_score == 60.0
         assert score.unified_score == pytest.approx(expected, abs=0.1)
 
@@ -145,7 +153,11 @@ class TestThreatScorerCompute:
         scorer = ThreatScorer()
         web = _make_web_report(raw_score=0.5)  # → 50
         score = scorer.compute(web_report=web)
-        expected = 50.0 * config.SCORE_WEIGHT_WEB
+        expected = (
+            5.0 * config.SCORE_WEIGHT_WIFI
+            + 5.0 * config.SCORE_WEIGHT_BEHAVIORAL
+            + 50.0 * config.SCORE_WEIGHT_WEB
+        )
         assert score.web_score == 50.0
         assert score.unified_score == pytest.approx(expected, abs=0.1)
 
@@ -698,14 +710,14 @@ class TestEdgeCases:
     def test_none_reports_produce_zero_score(self):
         scorer = ThreatScorer()
         score = scorer.compute(None, None, None)
-        assert score.unified_score == 0.0
+        assert score.unified_score == 5.0
         assert score.tier == "Safe"
 
     def test_negative_raw_score_clamped_to_zero(self):
         scorer = ThreatScorer()
         wifi = _make_wifi_report(raw_score=-0.5)
         score = scorer.compute(wifi_report=wifi)
-        assert score.wifi_score == 0.0
+        assert score.wifi_score == 5.0
 
     def test_exact_boundary_24(self):
         assert classify_tier(24) == "Safe"

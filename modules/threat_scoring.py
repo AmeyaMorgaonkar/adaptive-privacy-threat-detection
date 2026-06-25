@@ -159,7 +159,7 @@ class ThreatScorer:
             + behavioral_score * config.SCORE_WEIGHT_BEHAVIORAL
             + web_score * config.SCORE_WEIGHT_WEB
         )
-        unified = round(min(max(unified, 0.0), 100.0), 2)
+        unified = round(min(max(unified, 5.0), 100.0), 2)
 
         tier = classify_tier(unified)
         active_threats = self._collect_threats(
@@ -205,11 +205,11 @@ class ThreatScorer:
 
     @staticmethod
     def _scale(report) -> float:
-        """Convert a report's ``raw_score`` (0–1) to a 0–100 value."""
+        """Convert a report's ``raw_score`` (0–1) to a 0–100 value (minimum 5.0)."""
         if report is None:
-            return 0.0
+            return 5.0
         raw = getattr(report, "raw_score", 0.0)
-        return min(max(raw * 100.0, 0.0), 100.0)
+        return min(max(raw * 100.0, 5.0), 100.0)
 
     @staticmethod
     def _collect_threats(wifi_report, behavioral_report, web_report) -> list[str]:

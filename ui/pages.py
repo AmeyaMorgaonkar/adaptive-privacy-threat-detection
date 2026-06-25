@@ -57,6 +57,14 @@ def _vspacer(h=15):
     return s
 
 
+def _display_module_score(value):
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return 0
+    return int(max(numeric, 5.0))
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # VPN AND DNS CONTROL CARDS (with custom power toggle button)
 # ═══════════════════════════════════════════════════════════════════════
@@ -517,9 +525,9 @@ class DashboardPage(QWidget):
         r1g.setSpacing(12)
 
         self.score_card = StatCard(r1, "Overall Threat Score", "--",
-                                  "Waiting for data…", top_icon="🎯")
+                                  "", top_icon="🎯")
         self.threats_card = StatCard(r1, "Active Threats", "--",
-                        "No threats detected",
+                        "",
                                     value_color=t["danger"], top_icon="⚠️")
         self.vpn_card = VpnCard(r1, self.data_bridge)
         self.dns_card = DnsCard(r1, self.data_bridge)
@@ -749,13 +757,9 @@ class DashboardPage(QWidget):
         tier_info = TIER_COLORS.get(score.tier, TIER_COLORS["Safe"])
 
         self.score_card.update_value(int(score.unified_score), tier_info["fg"])
-        self.score_card.update_subtext(score.tier, tier_info["fg"])
 
         n = len(score.active_threats)
         self.threats_card.update_value(n, _t()["danger"] if n else _t()["accent"])
-        self.threats_card.update_subtext(
-            f"{n} threat{'s' if n != 1 else ''} detected" if n else "No threats detected",
-            _t()["danger"] if n else _t()["accent"])
 
         # ── Live module reports (used for mini-stats and recommended actions)
         reports = {}
@@ -866,10 +870,18 @@ class DashboardPage(QWidget):
             else:
                 return _t()["danger"]
 
-        self.wifi_bar.update_value(score.wifi_score, bar_color(score.wifi_score))
-        self.web_bar.update_value(score.web_score, bar_color(score.web_score))
-        self.behav_bar.update_value(score.behavioral_score,
-                                   bar_color(score.behavioral_score))
+        self.wifi_bar.update_value(
+            _display_module_score(score.wifi_score),
+            bar_color(score.wifi_score),
+        )
+        self.web_bar.update_value(
+            _display_module_score(score.web_score),
+            bar_color(score.web_score),
+        )
+        self.behav_bar.update_value(
+            _display_module_score(score.behavioral_score),
+            bar_color(score.behavioral_score),
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1463,7 +1475,10 @@ class BehaviourAnalysisPage(QWidget):
             elif v < 50: return t["warning"]
             else: return t["danger"]
 
-        self._score_card.update_value(int(bscore), score_color(bscore))
+        self._score_card.update_value(
+            _display_module_score(bscore),
+            score_color(bscore),
+        )
         sev_sub = {"LOW": "System is behaving normally",
                    "MEDIUM": "Some anomalies detected",
                    "HIGH": "Significant deviations detected"}
@@ -1993,7 +2008,10 @@ class WebTrackingPage(QWidget):
             f"{n_fp} signal{'s' if n_fp != 1 else ''} detected" if n_fp
             else "No fingerprinting detected", fp_color)
 
-        self._score_card.update_value(int(web_score), _score_color(web_score))
+        self._score_card.update_value(
+            _display_module_score(web_score),
+            _score_color(web_score),
+        )
         sev_sub = {"LOW": "Low risk", "MEDIUM": "Moderate risk",
                    "HIGH": "High risk"}
         self._score_card.update_subtext(sev_sub.get(severity, ""),
@@ -2688,6 +2706,20 @@ class SettingsPage(QWidget):
             value=auto_dns_val,
             callback=self._on_auto_dns_toggle
         ))
+        card_lay.addWidget(self._divider(card))
+
+        # ── NOTIFICATIONS ──
+        card_lay.addWidget(self._section_label(card, "NOTIFICATION CONTROLS"))
+        
+        push_notif_val = getattr(config, "PUSH_NOTIFICATIONS_ENABLED", True)
+        
+        card_lay.addWidget(_toggle_row(
+            card,
+            "Push Notifications",
+            "Show OS notifications when VPN or DNS are activated automatically",
+            value=push_notif_val,
+            callback=self._on_push_notif_toggle
+        ))
         card_lay.addWidget(_vspacer(20))
 
         lay.addWidget(card)
@@ -2724,6 +2756,12 @@ class SettingsPage(QWidget):
         if self.config_manager:
             self.config_manager.set("AUTO_DNS_SWITCH_ENABLED", checked)
             self.config_manager.set("AUTO_ENABLE_DNS_PROTECTION", checked)
+
+    def _on_push_notif_toggle(self, checked):
+        import config as cfg
+        cfg.PUSH_NOTIFICATIONS_ENABLED = checked
+        if self.config_manager:
+            self.config_manager.set("PUSH_NOTIFICATIONS_ENABLED", checked)
 
     def _section_label(self, parent, text):
         t = _t()

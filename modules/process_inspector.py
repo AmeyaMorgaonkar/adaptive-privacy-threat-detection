@@ -56,6 +56,7 @@ class ProcessInspector:
     """Enumerates, inspects, and flags running processes."""
 
     _SAFE_SET: set[str] | None = None
+    _IGNORED_NAMES = {"system idle process"}
 
     @classmethod
     def _get_safe_set(cls) -> set[str]:
@@ -87,6 +88,10 @@ class ProcessInspector:
                 info = proc.info  # type: ignore[attr-defined]
                 pid = info.get("pid", 0)
                 name = info.get("name", "") or ""
+
+                if self._is_ignored_process(pid, name):
+                    continue
+
                 exe_path = info.get("exe", "") or ""
 
                 mem_info = info.get("memory_info")
@@ -144,6 +149,9 @@ class ProcessInspector:
         """
         flagged: list[ProcessInfo] = []
         for p in processes:
+            if self._is_ignored_process(p.pid, p.name):
+                continue
+
             reasons: list[str] = []
 
             if not self.is_known_process(p.name):
@@ -195,6 +203,12 @@ class ProcessInspector:
         if not name:
             return False
         return name.lower() in self._get_safe_set()
+
+    def _is_ignored_process(self, pid: int, name: str) -> bool:
+        """Return True for placeholder processes that should not be analyzed."""
+        if pid == 0:
+            return True
+        return name.strip().lower() in self._IGNORED_NAMES
 
     # ── Helpers ──────────────────────────────────────────────────────
 
