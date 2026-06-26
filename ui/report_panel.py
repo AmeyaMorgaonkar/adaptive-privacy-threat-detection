@@ -64,6 +64,14 @@ class ReportPanel(QWidget):
         super().__init__(parent)
         self.data_bridge = data_bridge
         self._last_report = None
+        
+        # Fix 7: Snapshot guard for hardening recommendations
+        self._last_recs_snapshot = None
+        
+        # Fix 8: HardeningAdvisor caching
+        self._hardening_advisor = None
+        self._hardening_analysis_cache = None  # (input_snapshot, priority_actions)
+        
         t = _t()
 
         lay = QVBoxLayout(self)
@@ -236,6 +244,7 @@ class ReportPanel(QWidget):
 
         # Load history on startup
         self._refresh_history()
+        self._history_placeholder = None
 
     # ── Score row helper ─────────────────────────────────────────────
 
@@ -314,31 +323,69 @@ class ReportPanel(QWidget):
         # Hardening recommendations
         try:
             from modules.hardening import HardeningAdvisor
-            advisor = HardeningAdvisor()
-            recs = advisor.analyze(
-                wifi_report=wifi_report,
-                behavioral_report=behavioral_report,
-                web_report=web_report,
-                threat_score=score,
-            )
-            recs = advisor.get_priority_actions(recs)
+
+            # Fix 8: Lazy-create advisor singleton; never recreate
+            if self._hardening_advisor is None:
+                self._hardening_advisor = HardeningAdvisor()
+
+            # Fix 8: Compute lightweight input snapshot for cache check
+            _inp_parts = []
+            if wifi_report is not None:
+                _inp_parts.append(str(getattr(wifi_report, 'severity', '')))
+                _inp_parts.append(str(getattr(wifi_report, 'connected_ssid', '')))
+                _inp_parts.append(str(getattr(wifi_report, 'encryption', '')))
+                _inp_parts.append(str(len(getattr(wifi_report, 'threats_detected', []))))
+            if behavioral_report is not None:
+                _inp_parts.append(str(getattr(behavioral_report, 'severity', '')))
+                _inp_parts.append(str(getattr(behavioral_report, 'behavioral_score', 0)))
+            if web_report is not None:
+                _inp_parts.append(str(getattr(web_report, 'severity', '')))
+                _inp_parts.append(str(getattr(web_report, 'web_score', 0)))
+            _inp_parts.append(str(int(score.unified_score)))
+            _inp_parts.append(score.tier)
+            _hardening_input_snapshot = tuple(_inp_parts)
+
+            # Fix 8: Use cached result if input hasn't changed
+            if (self._hardening_analysis_cache is not None
+                    and self._hardening_analysis_cache[0] == _hardening_input_snapshot):
+                recs = self._hardening_analysis_cache[1]
+            else:
+                recs = self._hardening_advisor.analyze(
+                    wifi_report=wifi_report,
+                    behavioral_report=behavioral_report,
+                    web_report=web_report,
+                    threat_score=score,
+                )
+                recs = self._hardening_advisor.get_priority_actions(recs)
+                recs = list(recs)  # prevent mutation of cached value
+                self._hardening_analysis_cache = (_hardening_input_snapshot, recs)
+
             self._recs_card.update_value(str(len(recs)))
 
-            # Clear existing rec widgets
-            while self._recs_container.count():
-                child = self._recs_container.takeAt(0)
-                if child.widget():
-                    child.widget().deleteLater()
+            # Fix 7: Snapshot guard — skip rebuild if recs unchanged
+            _recs_snapshot = tuple(
+                (getattr(rec, 'title', ''), getattr(rec, 'priority', ''), getattr(rec, 'category', ''))
+                for rec in recs
+            ) if recs else ()
 
-            if recs:
-                for rec in recs:
-                    self._recs_container.addWidget(
-                        self._build_rec_card(rec))
-            else:
-                ok = QLabel("  ✓ No hardening actions required at this time.")
-                ok.setFont(QFont("Segoe UI", 11))
-                ok.setStyleSheet(f"color: {t['accent']};")
-                self._recs_container.addWidget(ok)
+            if _recs_snapshot != self._last_recs_snapshot:
+                self._last_recs_snapshot = _recs_snapshot
+
+                # Clear existing rec widgets
+                while self._recs_container.count():
+                    child = self._recs_container.takeAt(0)
+                    if child.widget():
+                        child.widget().deleteLater()
+
+                if recs:
+                    for rec in recs:
+                        self._recs_container.addWidget(
+                            self._build_rec_card(rec))
+                else:
+                    ok = QLabel("  ✓ No hardening actions required at this time.")
+                    ok.setFont(QFont("Segoe UI", 11))
+                    ok.setStyleSheet(f"color: {t['accent']};")
+                    self._recs_container.addWidget(ok)
 
             # Store latest report data for export
             self._last_score = score

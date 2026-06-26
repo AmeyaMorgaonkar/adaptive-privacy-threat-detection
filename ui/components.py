@@ -17,6 +17,42 @@ def _t():
     return get_card_tokens()
 
 
+def _resolve_color_name(color_str):
+    if not color_str:
+        return "primary"
+    color_str = color_str.lower()
+    if color_str in ("primary", "secondary", "muted", "accent", "danger", "warning", "blue", "critical"):
+        return color_str
+    t = get_card_tokens()
+    if color_str == t.get("accent", "").lower():
+        return "accent"
+    elif color_str == t.get("danger", "").lower():
+        return "danger"
+    elif color_str == t.get("warning", "").lower():
+        return "warning"
+    elif color_str == t.get("text_primary", "").lower():
+        return "primary"
+    elif color_str == t.get("text_secondary", "").lower():
+        return "secondary"
+    elif color_str == t.get("text_muted", "").lower():
+        return "muted"
+    
+    for tier, info in TIER_COLORS.items():
+        if color_str == info["fg"].lower():
+            if tier == "Safe":
+                return "accent"
+            elif tier == "Low Risk":
+                return "blue"
+            elif tier == "Elevated":
+                return "warning"
+            elif tier == "High Risk":
+                return "danger"
+            elif tier == "Critical":
+                return "critical"
+    
+    return "primary"
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # PILL / BADGE LABEL
 # ═══════════════════════════════════════════════════════════════════════
@@ -27,15 +63,12 @@ class PillLabel(QLabel):
         super().__init__(text, parent)
         if color_type is None:
             color_type = text
-        bg, fg = PILL_COLORS.get(color_type.upper(), ("#F3F4F6", "#374151"))
+        pill_type = color_type.upper()
+        if pill_type not in PILL_COLORS:
+            pill_type = "DEFAULT"
+        self.setProperty("pillType", pill_type)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-        self.setStyleSheet(f"""
-            QLabel {{
-                background-color: {bg}; color: {fg};
-                border-radius: 6px; padding: 3px 10px;
-            }}
-        """)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -48,10 +81,6 @@ class StatCard(GlassFrame):
                  value_color=None, value_size=36, top_icon=None,
                  subtext_color=None):
         super().__init__(parent)
-        t = _t()
-        if value_color is None:
-            value_color = t["text_primary"]
-
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 22, 22, 22)
         layout.setSpacing(4)
@@ -59,8 +88,8 @@ class StatCard(GlassFrame):
         # Header
         top = QHBoxLayout()
         title_lbl = QLabel(title.upper())
+        title_lbl.setObjectName("statCardTitle")
         title_lbl.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-        title_lbl.setStyleSheet(f"color: {t['text_muted']};")
         top.addWidget(title_lbl)
         top.addStretch()
         if top_icon:
@@ -73,13 +102,14 @@ class StatCard(GlassFrame):
         val_row = QHBoxLayout()
         val_row.setSpacing(2)
         self._val_lbl = QLabel(str(value))
+        self._val_lbl.setObjectName("statCardValue")
+        self._val_lbl.setProperty("colorClass", _resolve_color_name(value_color))
         self._val_lbl.setFont(QFont("Segoe UI", value_size, QFont.Weight.Bold))
-        self._val_lbl.setStyleSheet(f"color: {value_color};")
         val_row.addWidget(self._val_lbl)
         if "score" in title.lower():
             suffix = QLabel("/100")
+            suffix.setObjectName("statCardSuffix")
             suffix.setFont(QFont("Segoe UI", 12))
-            suffix.setStyleSheet(f"color: {t['text_muted']};")
             suffix.setAlignment(Qt.AlignmentFlag.AlignBottom)
             val_row.addWidget(suffix)
         val_row.addStretch()
@@ -87,16 +117,17 @@ class StatCard(GlassFrame):
 
         # Subtext
         if subtext:
-            sc = subtext_color or t["text_muted"]
-            if "elevated" in subtext.lower():
-                sc = t["warning"]
+            if "elevated" in subtext.lower() or "requires" in subtext.lower():
+                color_name = "warning"
             elif "safe" in subtext.lower() or "optimal" in subtext.lower():
-                sc = t["accent"]
-            elif "requires" in subtext.lower():
-                sc = t["warning"]
+                color_name = "accent"
+            else:
+                color_name = _resolve_color_name(subtext_color) if subtext_color else "muted"
+            
             self._sub_lbl = QLabel(subtext)
+            self._sub_lbl.setObjectName("statCardSubtext")
+            self._sub_lbl.setProperty("colorClass", color_name)
             self._sub_lbl.setFont(QFont("Segoe UI", 10))
-            self._sub_lbl.setStyleSheet(f"color: {sc};")
             self._sub_lbl.setWordWrap(True)
             layout.addWidget(self._sub_lbl)
         else:
@@ -106,13 +137,17 @@ class StatCard(GlassFrame):
     def update_value(self, value, color=None):
         self._val_lbl.setText(str(value))
         if color:
-            self._val_lbl.setStyleSheet(f"color: {color};")
+            self._val_lbl.setProperty("colorClass", _resolve_color_name(color))
+            self._val_lbl.style().unpolish(self._val_lbl)
+            self._val_lbl.style().polish(self._val_lbl)
 
     def update_subtext(self, text, color=None):
         if self._sub_lbl:
             self._sub_lbl.setText(text)
             if color:
-                self._sub_lbl.setStyleSheet(f"color: {color};")
+                self._sub_lbl.setProperty("colorClass", _resolve_color_name(color))
+                self._sub_lbl.style().unpolish(self._sub_lbl)
+                self._sub_lbl.style().polish(self._sub_lbl)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -122,19 +157,17 @@ class StatCard(GlassFrame):
 def section_header(parent, title, right_text=None, right_color=None,
                    right_callback=None):
     """Bold title left, optional clickable link right."""
-    t = _t()
-    if right_color is None:
-        right_color = t["accent"]
     fr = QWidget(parent)
     lay = QHBoxLayout(fr)
     lay.setContentsMargins(22, 22, 22, 12)
     lbl = QLabel(title)
+    lbl.setObjectName("sectionHeaderTitle")
     lbl.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
-    lbl.setStyleSheet(f"color: {t['text_primary']};")
     lay.addWidget(lbl)
     lay.addStretch()
     if right_text:
-        rl = ClickableLabel(right_text, right_color, right_callback)
+        rc = right_color or "accent"
+        rl = ClickableLabel(right_text, rc, right_callback)
         lay.addWidget(rl)
     return fr
 
@@ -145,21 +178,11 @@ class ClickableLabel(QLabel):
 
     def __init__(self, text, color="#10B981", callback=None, parent=None):
         super().__init__(text, parent)
-        self._color = color
         self.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._set_normal()
+        self.setProperty("colorClass", _resolve_color_name(color))
         if callback:
             self.clicked.connect(callback)
-
-    def _set_normal(self):
-        self.setStyleSheet(f"color: {self._color};")
-
-    def enterEvent(self, event):
-        self.setStyleSheet(f"color: {self._color}; text-decoration: underline;")
-
-    def leaveEvent(self, event):
-        self._set_normal()
 
     def mousePressEvent(self, event):
         self.clicked.emit()
@@ -173,7 +196,6 @@ def table_header(parent, columns):
     """Column header row + divider.
     Each column: (width, text) or (width, text, alignment)
     """
-    t = _t()
     container = QWidget(parent)
     outer = QVBoxLayout(container)
     outer.setContentsMargins(22, 0, 22, 0)
@@ -187,8 +209,8 @@ def table_header(parent, columns):
         align = col[2] if len(col) > 2 else Qt.AlignmentFlag.AlignLeft
         
         lbl = QLabel(text.upper())
+        lbl.setObjectName("tableHeaderLabel")
         lbl.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-        lbl.setStyleSheet(f"color: {t['text_muted']};")
         lbl.setFixedWidth(width)
         lbl.setAlignment(align | Qt.AlignmentFlag.AlignVCenter)
         row.addWidget(lbl)
@@ -196,9 +218,8 @@ def table_header(parent, columns):
     outer.addLayout(row)
 
     line = QFrame()
+    line.setObjectName("tableHeaderDivider")
     line.setFrameShape(QFrame.Shape.HLine)
-    line.setStyleSheet(f"background-color: {t['divider']}; border: none;"
-                       " max-height: 1px;")
     line.setFixedHeight(1)
     outer.addWidget(line)
     return container
@@ -208,15 +229,7 @@ class HoverRow(QWidget):
     """Table data data row with hover highlight."""
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._normal_bg = "transparent"
-        self._hover_bg = _t().get("row_hover", "#F3F4F6")
-        self.setStyleSheet(f"background: {self._normal_bg};")
-
-    def enterEvent(self, event):
-        self.setStyleSheet(f"background: {self._hover_bg}; border-radius: 6px;")
-
-    def leaveEvent(self, event):
-        self.setStyleSheet(f"background: {self._normal_bg};")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
 
 def table_row(parent, cells):
@@ -224,7 +237,6 @@ def table_row(parent, cells):
     Each cell: (width, text, style). style: normal|bold|light|pill|mono|trash
     If style ends with "_center", it center-aligns the text.
     """
-    t = _t()
     fr = HoverRow(parent)
     lay = QHBoxLayout(fr)
     # Increase vertical padding to make rows taller (improves Nearby Networks)
@@ -243,12 +255,12 @@ def table_row(parent, cells):
         if style == "pill":
             # Wrap the pill in a centered container of width w to prevent it from stretching
             container = QWidget(fr)
+            container.setObjectName("tableRowPillContainer")
             container.setFixedWidth(w)
-            container.setStyleSheet("background: transparent; border: none;")
             c_lay = QHBoxLayout(container)
             c_lay.setContentsMargins(0, 0, 0, 0)
             p = PillLabel(txt, txt, container)
-            c_lay.addWidget(p, alignment=Qt.AlignmentFlag.AlignCenter)
+            c_lay.addWidget(p, alignment=align | Qt.AlignmentFlag.AlignVCenter)
             lay.addWidget(container)
         elif style == "trash":
             tl = QLabel("🗑️")
@@ -258,17 +270,18 @@ def table_row(parent, cells):
             lay.addWidget(tl)
         else:
             font = QFont("Segoe UI", 11)
-            col = t["text_primary"]
+            color_class = "primary"
             if style == "bold":
                 font.setWeight(QFont.Weight.Bold)
             elif style == "light":
-                col = t["text_secondary"]
+                color_class = "secondary"
             elif style == "mono":
                 font = QFont("Consolas", 10)
-                col = t["text_secondary"]
+                color_class = "secondary"
             lbl = QLabel(txt)
+            lbl.setObjectName("tableRowLabel")
+            lbl.setProperty("colorClass", color_class)
             lbl.setFont(font)
-            lbl.setStyleSheet(f"color: {col};")
             lbl.setFixedWidth(w)
             lbl.setAlignment(align | Qt.AlignmentFlag.AlignVCenter)
             lay.addWidget(lbl)
@@ -286,32 +299,28 @@ class ActionCard(QFrame):
 
     def __init__(self, parent, icon, title, subtitle, badge_text=None):
         super().__init__(parent)
-        t = _t()
-        self._bg = "transparent"
-        self._bg_hover = t.get("row_hover", "#F3F4F6")
-        self.setStyleSheet(f"QFrame {{ background-color: {self._bg};"
-                           f" border-radius: 8px; border: none; }}")
+        self.setObjectName("actionCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(15, 14, 15, 14)
         lay.setSpacing(12)
 
         ib = QLabel(icon)
+        ib.setObjectName("actionCardIcon")
         ib.setFont(QFont("Segoe UI", 14))
         ib.setFixedSize(38, 38)
         ib.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        ib.setStyleSheet(f"background-color: {t['divider']}; border-radius: 8px;")
         lay.addWidget(ib)
 
         txt = QVBoxLayout()
         txt.setSpacing(2)
         t_lbl = QLabel(title)
+        t_lbl.setObjectName("actionCardTitle")
         t_lbl.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-        t_lbl.setStyleSheet(f"color: {t['text_primary']};")
         txt.addWidget(t_lbl)
         s_lbl = QLabel(subtitle)
+        s_lbl.setObjectName("actionCardSubtitle")
         s_lbl.setFont(QFont("Segoe UI", 9))
-        s_lbl.setStyleSheet(f"color: {t['text_secondary']};")
         s_lbl.setWordWrap(True)
         s_lbl.setMaximumWidth(320)
         txt.addWidget(s_lbl)
@@ -322,17 +331,9 @@ class ActionCard(QFrame):
             lay.addWidget(p)
         else:
             chev = QLabel("›")
+            chev.setObjectName("actionCardChevron")
             chev.setFont(QFont("Segoe UI", 18))
-            chev.setStyleSheet(f"color: {t['text_muted']};")
             lay.addWidget(chev)
-
-    def enterEvent(self, event):
-        self.setStyleSheet(f"QFrame {{ background-color: {self._bg_hover};"
-                           f" border-radius: 8px; border: none; }}")
-
-    def leaveEvent(self, event):
-        self.setStyleSheet(f"QFrame {{ background-color: {self._bg};"
-                           f" border-radius: 8px; border: none; }}")
 
     def mousePressEvent(self, event):
         self.clicked.emit()
@@ -342,53 +343,27 @@ class ActionCard(QFrame):
 # MINI STAT
 # ═══════════════════════════════════════════════════════════════════════
 
-def mini_stat(parent, icon, value, label):
-    """Small icon + value + label card."""
-    t = _t()
-    f = GlassFrame(parent)
-    layout = QVBoxLayout(f)
-    layout.setContentsMargins(18, 18, 18, 18)
-    layout.setSpacing(4)
-
-    icon_lbl = QLabel(icon)
-    icon_lbl.setFont(QFont("Segoe UI", 16))
-    icon_lbl.setStyleSheet(f"color: {t['text_secondary']};")
-    layout.addWidget(icon_lbl)
-
-    val_lbl = QLabel(str(value))
-    val_lbl.setFont(QFont("Segoe UI", 22, QFont.Weight.Bold))
-    val_lbl.setStyleSheet(f"color: {t['text_primary']};")
-    layout.addWidget(val_lbl)
-
-    lbl = QLabel(label.upper())
-    lbl.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
-    lbl.setStyleSheet(f"color: {t['text_muted']};")
-    layout.addWidget(lbl)
-    return f
-
-
 class MiniStat(GlassFrame):
     """Small icon + value + label card with runtime update API."""
     def __init__(self, parent, icon, value="--", label=""):
         super().__init__(parent)
-        t = _t()
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(18, 18, 18, 18)
         self._layout.setSpacing(4)
 
         self._icon_lbl = QLabel(icon)
+        self._icon_lbl.setObjectName("miniStatIcon")
         self._icon_lbl.setFont(QFont("Segoe UI", 16))
-        self._icon_lbl.setStyleSheet(f"color: {t['text_secondary']};")
         self._layout.addWidget(self._icon_lbl)
 
         self._val_lbl = QLabel(str(value))
+        self._val_lbl.setObjectName("miniStatValue")
         self._val_lbl.setFont(QFont("Segoe UI", 22, QFont.Weight.Bold))
-        self._val_lbl.setStyleSheet(f"color: {t['text_primary']};")
         self._layout.addWidget(self._val_lbl)
 
         self._label = QLabel(label.upper())
+        self._label.setObjectName("miniStatLabel")
         self._label.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
-        self._label.setStyleSheet(f"color: {t['text_muted']};")
         self._layout.addWidget(self._label)
 
     def update_value(self, value: str) -> None:
@@ -409,54 +384,112 @@ def mini_stat(parent, icon, value, label):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# PROGRESS ROW
+# PROGRESS BAR & ROW
 # ═══════════════════════════════════════════════════════════════════════
+
+class SentinelProgressBar(QWidget):
+    """Custom-painted, extremely reliable progress bar that avoids Qt QSS bugs."""
+    def __init__(self, parent=None, value=0, color="#10B981"):
+        super().__init__(parent)
+        self._value = value  # 0 to 100
+        self._color = color
+        self.setFixedHeight(8)
+
+    def setValue(self, value):
+        self._value = max(0, min(100, value))
+        self.update()
+
+    def set_color(self, color):
+        self._color = color
+        self.update()
+
+    def paintEvent(self, event):
+        t = _t()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Draw background track
+        track_color = QColor(t.get("input_border", "#374151"))
+        painter.setBrush(track_color)
+        painter.setPen(Qt.PenStyle.NoPen)
+        
+        w = self.width()
+        h = self.height()
+        painter.drawRoundedRect(0, 0, w, h, 4, 4)
+
+        # Draw progress chunk
+        if self._value > 0:
+            c_str = self._color
+            # Resolve semantic theme color or hex string
+            if c_str.startswith("#"):
+                color = QColor(c_str)
+            else:
+                if c_str == "accent":
+                    color = QColor(t.get("accent", "#10B981"))
+                elif c_str == "danger":
+                    color = QColor(t.get("danger", "#EF4444"))
+                elif c_str == "warning":
+                    color = QColor(t.get("warning", "#F59E0B"))
+                elif c_str == "blue":
+                    color = QColor("#3B82F6")
+                elif c_str == "critical":
+                    color = QColor("#DC2626")
+                elif c_str == "primary":
+                    color = QColor(t.get("text_primary", "#F9FAFB"))
+                elif c_str == "secondary":
+                    color = QColor(t.get("text_secondary", "#9CA3AF"))
+                elif c_str == "muted":
+                    color = QColor(t.get("text_muted", "#6B7280"))
+                else:
+                    # Fallback to resolving name or parsing raw color string
+                    name = _resolve_color_name(c_str)
+                    if name in t:
+                        color = QColor(t[name])
+                    elif name == "blue":
+                        color = QColor("#3B82F6")
+                    elif name == "critical":
+                        color = QColor("#DC2626")
+                    else:
+                        color = QColor(c_str)
+
+            painter.setBrush(color)
+            chunk_width = int((self._value / 100.0) * w)
+            if chunk_width > 0:
+                painter.drawRoundedRect(0, 0, chunk_width, h, 4, 4)
+
 
 class ProgressRow(QWidget):
     """Module threat score bar row with live update support."""
     def __init__(self, parent, label, pct_text="0%", color="#10B981", value=0):
         super().__init__(parent)
-        t = _t()
         lay = QVBoxLayout(self)
         lay.setContentsMargins(22, 8, 22, 8)
         lay.setSpacing(5)
 
         hdr = QHBoxLayout()
         self._lbl = QLabel(label)
+        self._lbl.setObjectName("progressRowLabel")
         self._lbl.setFont(QFont("Segoe UI", 11))
-        self._lbl.setStyleSheet(f"color: {t['text_primary']};")
         hdr.addWidget(self._lbl)
         hdr.addStretch()
         self._pct = QLabel(pct_text)
+        self._pct.setObjectName("progressRowPercent")
         self._pct.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-        self._pct.setStyleSheet(f"color: {t['text_primary']};")
         hdr.addWidget(self._pct)
         lay.addLayout(hdr)
 
-        self._bar = QProgressBar()
-        self._bar.setFixedHeight(8)
-        self._bar.setRange(0, 100)
-        self._bar.setValue(int(value * 100))
-        self._bar.setTextVisible(False)
-        self._set_bar_color(color)
+        self._bar = SentinelProgressBar(self, value=int(value * 100), color=color)
         lay.addWidget(self._bar)
 
     def _set_bar_color(self, color):
-        self._bar.setStyleSheet(f"""
-            QProgressBar {{
-                background-color: {_t()['divider']};
-                border: none; border-radius: 4px;
-            }}
-            QProgressBar::chunk {{
-                background-color: {color}; border-radius: 4px;
-            }}
-        """)
+        self._bar.set_color(color)
 
     def update_value(self, score_100, color=None):
         self._pct.setText(f"{int(score_100)}%")
         self._bar.setValue(int(score_100))
         if color:
             self._set_bar_color(color)
+
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -578,19 +611,10 @@ class ToggleSwitch(QWidget):
 
 def accent_button(text, parent=None, width=None):
     """Green filled button."""
-    t = _t()
     btn = QPushButton(text, parent)
     btn.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
-    style = f"""
-        QPushButton {{
-            background-color: {t['accent']}; color: white;
-            border-radius: 8px; padding: 8px 18px; border: none;
-        }}
-        QPushButton:hover {{ background-color: {t['accent_hover']}; }}
-        QPushButton:pressed {{ background-color: #047857; }}
-    """
-    btn.setStyleSheet(style)
+    btn.setProperty("btnStyle", "accent")
     if width:
         btn.setFixedWidth(width)
     return btn
@@ -598,19 +622,12 @@ def accent_button(text, parent=None, width=None):
 
 def outline_button(text, parent=None, color=None, width=None):
     """Outlined border button."""
-    t = _t()
-    c = color or t["text_secondary"]
-    border = t.get("input_border", "#D1D5DB")
     btn = QPushButton(text, parent)
     btn.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
-    btn.setStyleSheet(f"""
-        QPushButton {{
-            background: transparent; border: 1px solid {border};
-            color: {c}; border-radius: 6px; padding: 6px 16px;
-        }}
-        QPushButton:hover {{ background-color: {t['row_hover']}; }}
-    """)
+    btn.setProperty("btnStyle", "outline")
+    if color:
+        btn.setProperty("colorClass", _resolve_color_name(color))
     if width:
         btn.setFixedWidth(width)
     return btn
@@ -618,42 +635,20 @@ def outline_button(text, parent=None, color=None, width=None):
 
 def danger_outline_button(text, parent=None):
     """Red outlined button for danger zone."""
-    t = _t()
     btn = QPushButton(text, parent)
     btn.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
-    btn.setStyleSheet(f"""
-        QPushButton {{
-            background: transparent; border: 1px solid {t['danger']};
-            color: {t['danger']}; border-radius: 6px; padding: 6px 16px;
-        }}
-        QPushButton:hover {{ background-color: {t['danger_tint']}; }}
-    """)
+    btn.setProperty("btnStyle", "danger-outline")
     return btn
 
 
 def pill_button(text, active=False, parent=None):
     """Rounded pill filter button."""
-    t = _t()
     btn = QPushButton(text, parent)
     btn.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
     btn.setFixedHeight(32)
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
+    btn.setProperty("btnStyle", "pill")
     if active:
-        btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {t['accent']}; color: white;
-                border-radius: 16px; padding: 0 18px; border: none;
-            }}
-            QPushButton:hover {{ background-color: {t['accent_hover']}; }}
-        """)
-    else:
-        btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent; color: {t['text_secondary']};
-                border: 1px solid {t['divider']}; border-radius: 16px;
-                padding: 0 18px;
-            }}
-            QPushButton:hover {{ background-color: {t['row_hover']}; }}
-        """)
+        btn.setProperty("active", True)
     return btn

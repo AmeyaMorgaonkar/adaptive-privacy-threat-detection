@@ -498,6 +498,14 @@ class DashboardPage(QWidget):
         self._dns_thread = None
         self._last_score_timestamp = None
         
+        # Fix 7: Snapshot guards for container rebuilds
+        self._last_recs_snapshot = None
+        self._last_threats_snapshot = None
+        
+        # Fix 8: HardeningAdvisor caching
+        self._hardening_advisor = None
+        self._hardening_analysis_cache = None  # (input_snapshot, priority_actions)
+        
         t = _t()
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -573,10 +581,10 @@ class DashboardPage(QWidget):
         self._recommended_layout.setContentsMargins(22, 0, 22, 15)
         self._recommended_layout.setSpacing(8)
         # initial placeholder
-        self._no_recs_lbl = QLabel("✅ No recommended actions required.")
-        self._no_recs_lbl.setFont(QFont("Segoe UI", 11))
-        self._no_recs_lbl.setStyleSheet(f"color: {t['accent']};")
-        self._recommended_layout.addWidget(self._no_recs_lbl)
+        no_recs_lbl = QLabel("✅ No recommended actions required.")
+        no_recs_lbl.setFont(QFont("Segoe UI", 11))
+        no_recs_lbl.setStyleSheet(f"color: {t['accent']};")
+        self._recommended_layout.addWidget(no_recs_lbl)
         ra_lay.addWidget(self._recommended_widget)
         ra_lay.addWidget(_vspacer(8))
         r2g.addWidget(ra_card, 0, 1)
@@ -591,7 +599,7 @@ class DashboardPage(QWidget):
         self.threats_table_lay.addWidget(table_header(self.threats_table_frame, [
             (150, "Module"),
             (710, "Threat Description"),
-            (120, "Severity")
+            (120, "Severity", Qt.AlignmentFlag.AlignCenter)
         ]))
         
         # Row container
@@ -602,11 +610,11 @@ class DashboardPage(QWidget):
         self.threats_table_lay.addWidget(self._threats_rows_widget)
         
         # Empty placeholder label when no threats
-        self._no_threats_lbl = QLabel("✅ No active threats detected.")
-        self._no_threats_lbl.setFont(QFont("Segoe UI", 11))
-        self._no_threats_lbl.setStyleSheet(f"color: {t['accent']};")
-        self._no_threats_lbl.setContentsMargins(22, 14, 22, 14)
-        self._threats_rows_lay.addWidget(self._no_threats_lbl)
+        no_threats_lbl = QLabel("✅ No active threats detected.")
+        no_threats_lbl.setFont(QFont("Segoe UI", 11))
+        no_threats_lbl.setStyleSheet(f"color: {t['accent']};")
+        no_threats_lbl.setContentsMargins(22, 14, 22, 14)
+        self._threats_rows_lay.addWidget(no_threats_lbl)
         
         self.threats_table_lay.addWidget(_vspacer(10))
         lay.addWidget(self.threats_table_frame)
@@ -774,90 +782,142 @@ class DashboardPage(QWidget):
 
         # ── Recommended actions (fed from HardeningAdvisor)
         try:
-            # clear previous items
-            while self._recommended_layout.count():
-                item = self._recommended_layout.takeAt(0)
-                w = item.widget()
-                if w is not None:
-                    w.deleteLater()
-
             from modules.hardening import HardeningAdvisor
-            advisor = HardeningAdvisor()
-            hardening_recs = advisor.analyze(
-                wifi_report=wifi_report,
-                behavioral_report=behavioral_report,
-                web_report=web_report,
-                threat_score=score
-            )
-            # Sort by priority
-            hardening_recs = advisor.get_priority_actions(hardening_recs)
 
-            if not hardening_recs:
-                self._recommended_layout.addWidget(self._no_recs_lbl)
+            # Fix 8: Lazy-create advisor singleton; never recreate
+            if self._hardening_advisor is None:
+                self._hardening_advisor = HardeningAdvisor()
+
+            # Fix 8: Compute lightweight input snapshot for cache check
+            _inp_parts = []
+            if wifi_report is not None:
+                _inp_parts.append(str(getattr(wifi_report, 'severity', '')))
+                _inp_parts.append(str(getattr(wifi_report, 'connected_ssid', '')))
+                _inp_parts.append(str(getattr(wifi_report, 'encryption', '')))
+                _inp_parts.append(str(len(getattr(wifi_report, 'threats_detected', []))))
+            if behavioral_report is not None:
+                _inp_parts.append(str(getattr(behavioral_report, 'severity', '')))
+                _inp_parts.append(str(getattr(behavioral_report, 'behavioral_score', 0)))
+            if web_report is not None:
+                _inp_parts.append(str(getattr(web_report, 'severity', '')))
+                _inp_parts.append(str(getattr(web_report, 'web_score', 0)))
+            _inp_parts.append(str(int(score.unified_score)))
+            _inp_parts.append(score.tier)
+            _hardening_input_snapshot = tuple(_inp_parts)
+
+            # Fix 8: Use cached result if input hasn't changed
+            if (self._hardening_analysis_cache is not None
+                    and self._hardening_analysis_cache[0] == _hardening_input_snapshot):
+                hardening_recs = self._hardening_analysis_cache[1]
             else:
-                cat_icons = {
-                    "WIFI": "📶",
-                    "PROCESSES": "⚙️",
-                    "BROWSER": "🌐",
-                    "SYSTEM": "🖥️"
-                }
-                for rec in hardening_recs:
-                    icon = cat_icons.get(rec.category.upper(), "🛡️")
-                    title = rec.title
-                    sub = rec.description
-                    tag = rec.priority  # E.g., IMMEDIATE, HIGH, MEDIUM, LOW
-                    self._recommended_layout.addWidget(ActionCard(self._recommended_widget, icon, title, sub, tag))
+                hardening_recs = self._hardening_advisor.analyze(
+                    wifi_report=wifi_report,
+                    behavioral_report=behavioral_report,
+                    web_report=web_report,
+                    threat_score=score
+                )
+                hardening_recs = self._hardening_advisor.get_priority_actions(hardening_recs)
+                hardening_recs = list(hardening_recs)  # prevent mutation of cached value
+                self._hardening_analysis_cache = (_hardening_input_snapshot, hardening_recs)
+
+            # Fix 7: Snapshot guard — skip rebuild if recs unchanged
+            _recs_snapshot = tuple(
+                (rec.title, rec.priority, rec.category) for rec in hardening_recs
+            ) if hardening_recs else ()
+
+            if _recs_snapshot != self._last_recs_snapshot:
+                self._last_recs_snapshot = _recs_snapshot
+
+                # Clear previous items
+                while self._recommended_layout.count():
+                    item = self._recommended_layout.takeAt(0)
+                    w = item.widget()
+                    if w is not None:
+                        w.deleteLater()
+
+                if not hardening_recs:
+                    lbl = QLabel("✅ No recommended actions required.")
+                    lbl.setFont(QFont("Segoe UI", 11))
+                    lbl.setStyleSheet(f"color: {_t()['accent']};")
+                    self._recommended_layout.addWidget(lbl)
+                else:
+                    cat_icons = {
+                        "WIFI": "📶",
+                        "PROCESSES": "⚙️",
+                        "BROWSER": "🌐",
+                        "SYSTEM": "🖥️"
+                    }
+                    for rec in hardening_recs:
+                        icon = cat_icons.get(rec.category.upper(), "🛡️")
+                        title = rec.title
+                        sub = rec.description
+                        tag = rec.priority  # E.g., IMMEDIATE, HIGH, MEDIUM, LOW
+                        self._recommended_layout.addWidget(ActionCard(self._recommended_widget, icon, title, sub, tag))
         except Exception as exc:
             log.error("Failed to generate recommendations: %s", exc)
             try:
-                self._recommended_layout.addWidget(self._no_recs_lbl)
+                lbl = QLabel("✅ No recommended actions required.")
+                lbl.setFont(QFont("Segoe UI", 11))
+                lbl.setStyleSheet(f"color: {_t()['accent']};")
+                self._recommended_layout.addWidget(lbl)
             except Exception:
                 pass
 
         # ── Active threats table ──
         try:
-            # Clear previous items
-            while self._threats_rows_lay.count():
-                item = self._threats_rows_lay.takeAt(0)
-                w = item.widget()
-                if w is not None:
-                    w.deleteLater()
-
             active_threats = getattr(score, "active_threats", [])
-            if not active_threats:
-                self._threats_rows_lay.addWidget(self._no_threats_lbl)
-            else:
-                for threat in active_threats:
-                    threat_str = str(threat)
-                    
-                    # Determine Module
-                    if "anomalous process" in threat_str.lower() or "behavior" in threat_str.lower():
-                        module = "Behaviour"
-                        report_severity = getattr(behavioral_report, "severity", "WARNING") if behavioral_report else "WARNING"
-                    elif "tracker" in threat_str.lower() or "fingerprint" in threat_str.lower():
-                        module = "Web"
-                        report_severity = getattr(web_report, "severity", "WARNING") if web_report else "WARNING"
-                    else:
-                        module = "WiFi"
-                        report_severity = getattr(wifi_report, "severity", "WARNING") if wifi_report else "WARNING"
 
-                    # Determine Severity
-                    if "evil-twin" in threat_str.lower() or "critical" in threat_str.lower() or "unauthorized" in threat_str.lower():
-                        severity = "CRITICAL"
-                    else:
-                        # Use the report severity or map it
-                        severity = report_severity.upper()
-                        if severity not in ("CRITICAL", "HIGH", "WARNING", "INFO"):
-                            severity = "WARNING"
-                    
-                    self._threats_rows_lay.addWidget(table_row(
-                        self.threats_table_frame,
-                        [
-                            (150, module, "bold"),
-                            (710, threat_str),
-                            (120, severity, "pill")
-                        ]
-                    ))
+            # Fix 7: Snapshot guard — skip rebuild if threats unchanged
+            _threats_snapshot = tuple(str(t) for t in active_threats) if active_threats else ()
+
+            if _threats_snapshot != self._last_threats_snapshot:
+                self._last_threats_snapshot = _threats_snapshot
+
+                # Clear previous items
+                while self._threats_rows_lay.count():
+                    item = self._threats_rows_lay.takeAt(0)
+                    w = item.widget()
+                    if w is not None:
+                        w.deleteLater()
+
+                if not active_threats:
+                    lbl = QLabel("✅ No active threats detected.")
+                    lbl.setFont(QFont("Segoe UI", 11))
+                    lbl.setStyleSheet(f"color: {_t()['accent']};")
+                    lbl.setContentsMargins(22, 14, 22, 14)
+                    self._threats_rows_lay.addWidget(lbl)
+                else:
+                    for threat in active_threats:
+                        threat_str = str(threat)
+                        
+                        # Determine Module
+                        if "anomalous process" in threat_str.lower() or "behavior" in threat_str.lower():
+                            module = "Behaviour"
+                            report_severity = getattr(behavioral_report, "severity", "WARNING") if behavioral_report else "WARNING"
+                        elif "tracker" in threat_str.lower() or "fingerprint" in threat_str.lower():
+                            module = "Web"
+                            report_severity = getattr(web_report, "severity", "WARNING") if web_report else "WARNING"
+                        else:
+                            module = "WiFi"
+                            report_severity = getattr(wifi_report, "severity", "WARNING") if wifi_report else "WARNING"
+
+                        # Determine Severity
+                        if "evil-twin" in threat_str.lower() or "critical" in threat_str.lower() or "unauthorized" in threat_str.lower():
+                            severity = "CRITICAL"
+                        else:
+                            # Use the report severity or map it
+                            severity = report_severity.upper()
+                            if severity not in ("CRITICAL", "HIGH", "WARNING", "INFO"):
+                                severity = "WARNING"
+                        
+                        self._threats_rows_lay.addWidget(table_row(
+                            self.threats_table_frame,
+                            [
+                                (150, module, "bold"),
+                                (710, threat_str),
+                                (120, severity, "pill_center")
+                            ]
+                        ))
         except Exception as exc:
             log.error("Failed to populate active threats: %s", exc)
 
@@ -892,6 +952,11 @@ class WiFiSecurityPage(QWidget):
     def __init__(self, parent=None, data_bridge=None):
         super().__init__(parent)
         self.data_bridge = data_bridge
+        
+        # Fix 7: Snapshot guards for container rebuilds
+        self._last_networks_snapshot = None
+        self._last_threats_snapshot = None
+        
         t = _t()
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -1021,7 +1086,10 @@ class WiFiSecurityPage(QWidget):
         lt_t.setStyleSheet(f"color: {t['text_primary']};")
         lt.addWidget(lt_t)
         lt.addStretch()
-        lt.addWidget(outline_button("RUN TEST"))
+        btn = outline_button("RUN TEST", self)
+        btn.setEnabled(False)
+        btn.setToolTip("DNS leak test not yet implemented")
+        lt.addWidget(btn)
         leak_lay.addLayout(lt)
         leak_icon = QLabel("✅")
         leak_icon.setFont(QFont("Segoe UI", 32))
@@ -1153,48 +1221,69 @@ class WiFiSecurityPage(QWidget):
 
         # ── Nearby networks ──
         networks = _rget("nearby_networks", [])
-        for w in self._net_rows:
-            self._net_layout.removeWidget(w)
-            w.deleteLater()
-        self._net_rows.clear()
+
+        # Fix 7: Snapshot guard — skip rebuild if networks unchanged
         if networks:
             from modules.wifi_analysis import WiFiAnalyzer
-            insert_idx = self._net_layout.indexOf(self._net_spacer)
-            for net in networks:
-                ssid_n = net.get("ssid", "") or "(hidden)"
-                sig_n = net.get("signal_dbm", -100)
-                enc_n = WiFiAnalyzer.evaluate_encryption(net)
-                status = ("SUSPICIOUS" if enc_n == "OPEN"
-                          else "SAFE" if enc_n in ("WPA3", "WPA2")
-                          else "UNKNOWN")
-                row = table_row(self._net_card,
-                                [(200, ssid_n, "bold"),
-                                 (120, f"{sig_n} dBm"),
-                                 (140, enc_n),
-                                 (140, status, "pill")])
-                self._net_rows.append(row)
-                self._net_layout.insertWidget(insert_idx, row)
-                insert_idx += 1
+            _net_snapshot = tuple(
+                (net.get("ssid", "") or "(hidden)",
+                 net.get("signal_dbm", -100),
+                 WiFiAnalyzer.evaluate_encryption(net))
+                for net in networks
+            )
+        else:
+            _net_snapshot = ()
+
+        if _net_snapshot != self._last_networks_snapshot:
+            self._last_networks_snapshot = _net_snapshot
+
+            for w in self._net_rows:
+                self._net_layout.removeWidget(w)
+                w.deleteLater()
+            self._net_rows.clear()
+            if networks:
+                insert_idx = self._net_layout.indexOf(self._net_spacer)
+                for net in networks:
+                    ssid_n = net.get("ssid", "") or "(hidden)"
+                    sig_n = net.get("signal_dbm", -100)
+                    enc_n = WiFiAnalyzer.evaluate_encryption(net)
+                    status = ("SUSPICIOUS" if enc_n == "OPEN"
+                              else "SAFE" if enc_n in ("WPA3", "WPA2")
+                              else "UNKNOWN")
+                    row = table_row(self._net_card,
+                                    [(200, ssid_n, "bold"),
+                                     (120, f"{sig_n} dBm"),
+                                     (140, enc_n),
+                                     (140, status, "pill")])
+                    self._net_rows.append(row)
+                    self._net_layout.insertWidget(insert_idx, row)
+                    insert_idx += 1
 
         # ── Threats list ──
-        for w in self._threat_widgets:
-            self._threats_container.removeWidget(w)
-            w.deleteLater()
-        self._threat_widgets.clear()
-        if threats:
-            for threat_str in threats:
-                lbl = QLabel(f"⚠️  {threat_str}")
-                lbl.setFont(QFont("Segoe UI", 11))
-                lbl.setStyleSheet(f"color: {t['danger']};")
-                lbl.setWordWrap(True)
-                self._threats_container.addWidget(lbl)
-                self._threat_widgets.append(lbl)
-        else:
-            ok = QLabel("✅  No threats detected. Network is clean.")
-            ok.setFont(QFont("Segoe UI", 11))
-            ok.setStyleSheet(f"color: {t['accent']};")
-            self._threats_container.addWidget(ok)
-            self._threat_widgets.append(ok)
+        # Fix 7: Snapshot guard — skip rebuild if threats unchanged
+        _threats_snapshot = tuple(str(t_str) for t_str in threats) if threats else ()
+
+        if _threats_snapshot != self._last_threats_snapshot:
+            self._last_threats_snapshot = _threats_snapshot
+
+            for w in self._threat_widgets:
+                self._threats_container.removeWidget(w)
+                w.deleteLater()
+            self._threat_widgets.clear()
+            if threats:
+                for threat_str in threats:
+                    lbl = QLabel(f"⚠️  {threat_str}")
+                    lbl.setFont(QFont("Segoe UI", 11))
+                    lbl.setStyleSheet(f"color: {t['danger']};")
+                    lbl.setWordWrap(True)
+                    self._threats_container.addWidget(lbl)
+                    self._threat_widgets.append(lbl)
+            else:
+                ok = QLabel("✅  No threats detected. Network is clean.")
+                ok.setFont(QFont("Segoe UI", 11))
+                ok.setStyleSheet(f"color: {t['accent']};")
+                self._threats_container.addWidget(ok)
+                self._threat_widgets.append(ok)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1205,6 +1294,11 @@ class BehaviourAnalysisPage(QWidget):
     def __init__(self, parent=None, data_bridge=None):
         super().__init__(parent)
         self.data_bridge = data_bridge
+        
+        # Fix 7: Snapshot guards for container rebuilds
+        self._last_fp_snapshot = None
+        self._last_anom_snapshot = None
+        
         t = _t()
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -1368,7 +1462,7 @@ class BehaviourAnalysisPage(QWidget):
         fphl.addWidget(fprl)
         fp_lay.addWidget(fph)
         self._fp_header = table_header(self._fp_frame, [(180, "Process Name"), (80, "CPU%"),
-                            (80, "Memory"), (80, "Risk")])
+                            (80, "Memory"), (80, "Risk", Qt.AlignmentFlag.AlignCenter)])
         fp_lay.addWidget(self._fp_header)
         self._fp_container = fp_lay
         self._fp_rows: list[QWidget] = []
@@ -1548,15 +1642,10 @@ class BehaviourAnalysisPage(QWidget):
                 f"Deviation: {deviation:.1f}% from baseline")
 
         # ── Flagged processes table ──
-        for w in self._fp_rows:
-            self._fp_container.removeWidget(w)
-            w.deleteLater()
-        self._fp_rows.clear()
-
-        insert_idx = self._fp_container.indexOf(self._fp_spacer)
+        # Fix 7: Compute snapshot of process data before rebuilding
+        _fp_data = []
         if snapshot is not None:
             processes = getattr(snapshot, "top_cpu_processes", []) if not isinstance(snapshot, dict) else snapshot.get("top_cpu_processes", [])
-            # Show top processes, highlighting suspicious ones
             shown = 0
             for p in processes:
                 if shown >= 8:
@@ -1571,36 +1660,45 @@ class BehaviourAnalysisPage(QWidget):
                     pcpu = getattr(p, "cpu_percent", 0.0)
                     pmem = getattr(p, "memory_mb", 0.0)
                     psusp = getattr(p, "is_suspicious", False)
-
                 is_flagged = pname in anomalous_procs or psusp
                 risk = "HIGH" if pcpu > config.HIGH_CPU_PROCESS_THRESHOLD else (
                     "MED" if is_flagged else "LOW")
+                _fp_data.append((pname, f"{pcpu:.1f}", f"{pmem:.0f}", risk))
+                shown += 1
 
+        _fp_snapshot = tuple(_fp_data) if _fp_data else ()
+
+        if _fp_snapshot != self._last_fp_snapshot:
+            self._last_fp_snapshot = _fp_snapshot
+
+            for w in self._fp_rows:
+                self._fp_container.removeWidget(w)
+                w.deleteLater()
+            self._fp_rows.clear()
+
+            insert_idx = self._fp_container.indexOf(self._fp_spacer)
+            for pname, pcpu_s, pmem_s, risk in _fp_data:
                 row = table_row(self, [
                     (180, pname, "mono"),
-                    (80, f"{pcpu:.1f}%"),
-                    (80, f"{pmem:.0f} MB", "light"),
-                    (80, risk, "pill"),
+                    (80, f"{pcpu_s}%"),
+                    (80, f"{pmem_s} MB", "light"),
+                    (80, risk, "pill_center"),
                 ])
                 self._fp_rows.append(row)
                 self._fp_container.insertWidget(insert_idx, row)
                 insert_idx += 1
-                shown += 1
 
-        if not self._fp_rows:
-            placeholder = QLabel("    No processes to display")
-            placeholder.setFont(QFont("Segoe UI", 11))
-            placeholder.setStyleSheet(f"color: {t['text_muted']};")
-            placeholder.setContentsMargins(22, 15, 22, 15)
-            self._fp_rows.append(placeholder)
-            self._fp_container.insertWidget(insert_idx, placeholder)
+            if not self._fp_rows:
+                placeholder = QLabel("    No processes to display")
+                placeholder.setFont(QFont("Segoe UI", 11))
+                placeholder.setStyleSheet(f"color: {t['text_muted']};")
+                placeholder.setContentsMargins(22, 15, 22, 15)
+                self._fp_rows.append(placeholder)
+                self._fp_container.insertWidget(insert_idx, placeholder)
 
         # ── Anomaly details list ──
-        for w in self._anom_widgets:
-            self._anom_container.removeWidget(w)
-            w.deleteLater()
-        self._anom_widgets.clear()
-
+        # Fix 7: Compute snapshot of anomaly data before rebuilding
+        _anom_data = []
         if anomalies:
             for anom in anomalies:
                 if isinstance(anom, dict):
@@ -1613,41 +1711,54 @@ class BehaviourAnalysisPage(QWidget):
                     adesc = getattr(anom, "description", "")
                     asev = getattr(anom, "severity", "LOW")
                     acontrib = getattr(anom, "score_contribution", 0)
+                _anom_data.append((atype, adesc, asev, acontrib))
 
-                sev_icon = {"LOW": "ℹ️", "MEDIUM": "⚠️", "HIGH": "🔴"}
-                icon = sev_icon.get(asev, "⚠️")
-                sev_color = {"LOW": t["text_secondary"], "MEDIUM": t["warning"],
-                             "HIGH": t["danger"]}
-                color = sev_color.get(asev, t["warning"])
+        _anom_snapshot = tuple(_anom_data) if _anom_data else ()
 
-                anom_w = QWidget()
-                anom_l = QVBoxLayout(anom_w)
-                anom_l.setContentsMargins(0, 6, 0, 6)
-                anom_l.setSpacing(2)
-                top_row = QHBoxLayout()
-                type_lbl = QLabel(f"{icon}  {atype}")
-                type_lbl.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-                type_lbl.setStyleSheet(f"color: {color};")
-                top_row.addWidget(type_lbl)
-                top_row.addStretch()
-                score_lbl = QLabel(f"+{acontrib:.0f}")
-                score_lbl.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-                score_lbl.setStyleSheet(f"color: {color};")
-                top_row.addWidget(score_lbl)
-                anom_l.addLayout(top_row)
-                desc_lbl = QLabel(adesc)
-                desc_lbl.setFont(QFont("Segoe UI", 10))
-                desc_lbl.setStyleSheet(f"color: {t['text_secondary']};")
-                desc_lbl.setWordWrap(True)
-                anom_l.addWidget(desc_lbl)
-                self._anom_container.addWidget(anom_w)
-                self._anom_widgets.append(anom_w)
-        else:
-            ok = QLabel("✅  No anomalies detected. System is behaving normally.")
-            ok.setFont(QFont("Segoe UI", 11))
-            ok.setStyleSheet(f"color: {t['accent']};")
-            self._anom_container.addWidget(ok)
-            self._anom_widgets.append(ok)
+        if _anom_snapshot != self._last_anom_snapshot:
+            self._last_anom_snapshot = _anom_snapshot
+
+            for w in self._anom_widgets:
+                self._anom_container.removeWidget(w)
+                w.deleteLater()
+            self._anom_widgets.clear()
+
+            if _anom_data:
+                for atype, adesc, asev, acontrib in _anom_data:
+                    sev_icon = {"LOW": "ℹ️", "MEDIUM": "⚠️", "HIGH": "🔴"}
+                    icon = sev_icon.get(asev, "⚠️")
+                    sev_color = {"LOW": t["text_secondary"], "MEDIUM": t["warning"],
+                                 "HIGH": t["danger"]}
+                    color = sev_color.get(asev, t["warning"])
+
+                    anom_w = QWidget()
+                    anom_l = QVBoxLayout(anom_w)
+                    anom_l.setContentsMargins(0, 6, 0, 6)
+                    anom_l.setSpacing(2)
+                    top_row = QHBoxLayout()
+                    type_lbl = QLabel(f"{icon}  {atype}")
+                    type_lbl.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+                    type_lbl.setStyleSheet(f"color: {color};")
+                    top_row.addWidget(type_lbl)
+                    top_row.addStretch()
+                    score_lbl = QLabel(f"+{acontrib:.0f}")
+                    score_lbl.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+                    score_lbl.setStyleSheet(f"color: {color};")
+                    top_row.addWidget(score_lbl)
+                    anom_l.addLayout(top_row)
+                    desc_lbl = QLabel(adesc)
+                    desc_lbl.setFont(QFont("Segoe UI", 10))
+                    desc_lbl.setStyleSheet(f"color: {t['text_secondary']};")
+                    desc_lbl.setWordWrap(True)
+                    anom_l.addWidget(desc_lbl)
+                    self._anom_container.addWidget(anom_w)
+                    self._anom_widgets.append(anom_w)
+            else:
+                ok = QLabel("✅  No anomalies detected. System is behaving normally.")
+                ok.setFont(QFont("Segoe UI", 11))
+                ok.setStyleSheet(f"color: {t['accent']};")
+                self._anom_container.addWidget(ok)
+                self._anom_widgets.append(ok)
 
         pass
 
@@ -1707,6 +1818,14 @@ class WebTrackingPage(QWidget):
     def __init__(self, parent=None, data_bridge=None):
         super().__init__(parent)
         self.data_bridge = data_bridge
+        
+        # Fix 7: Snapshot guards for container rebuilds
+        self._last_dom_snapshot = None
+        self._last_legend_snapshot = None
+        self._last_fp_snapshot = None
+        self._last_offenders_snapshot = None
+        self._last_actions_snapshot = None
+        
         t = _t()
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -2019,37 +2138,53 @@ class WebTrackingPage(QWidget):
 
         # ── Tracker domains table ──
         dom_layout = self._dom_card.layout()
-        for w in self._dom_rows:
-            dom_layout.removeWidget(w)
-            w.deleteLater()
-        self._dom_rows.clear()
 
+        # Fix 7: Snapshot guard for tracker domains
         if tracker_hits:
-            insert_idx = 2
-            # Sort by individual_score descending
             sorted_hits = sorted(tracker_hits,
                                   key=lambda h: getattr(h, "individual_score", 0),
                                   reverse=True)
-            for hit in sorted_hits[:10]:
-                domain = getattr(hit, "domain", "unknown")
-                cat = getattr(hit, "tracker_category", "unknown")
-                ind_score = getattr(hit, "individual_score", 0)
-                sev = getattr(hit, "severity", "LOW")
-                row = table_row(self._dom_card,
-                                [(200, domain, "bold"),
-                                 (120, cat.upper(), "pill"),
-                                 (80, f"{ind_score:.0f}", "normal_center"),
-                                 (120, sev, "pill")])
-                self._dom_rows.append(row)
-                dom_layout.insertWidget(insert_idx, row)
-                insert_idx += 1
+            _dom_snapshot = tuple(
+                (getattr(h, "domain", "unknown"),
+                 getattr(h, "tracker_category", "unknown"),
+                 getattr(h, "individual_score", 0),
+                 getattr(h, "severity", "LOW"))
+                for h in sorted_hits[:10]
+            )
         else:
-            placeholder = QLabel("    ✅ No trackers detected. Network is clean.")
-            placeholder.setFont(QFont("Segoe UI", 11))
-            placeholder.setStyleSheet(f"color: {t['accent']};")
-            placeholder.setContentsMargins(22, 15, 22, 15)
-            self._dom_rows.append(placeholder)
-            dom_layout.insertWidget(2, placeholder)
+            sorted_hits = []
+            _dom_snapshot = ()
+
+        if _dom_snapshot != self._last_dom_snapshot:
+            self._last_dom_snapshot = _dom_snapshot
+
+            for w in self._dom_rows:
+                dom_layout.removeWidget(w)
+                w.deleteLater()
+            self._dom_rows.clear()
+
+            if sorted_hits:
+                insert_idx = 2
+                for hit in sorted_hits[:10]:
+                    domain = getattr(hit, "domain", "unknown")
+                    cat = getattr(hit, "tracker_category", "unknown")
+                    ind_score = getattr(hit, "individual_score", 0)
+                    sev = getattr(hit, "severity", "LOW")
+                    row = table_row(self._dom_card,
+                                    [(200, domain, "bold"),
+                                     (120, cat.upper(), "pill_center"),
+                                     (80, f"{ind_score:.0f}", "normal_center"),
+                                     (120, sev, "pill_center")])
+                    self._dom_rows.append(row)
+                    dom_layout.insertWidget(insert_idx, row)
+                    insert_idx += 1
+            else:
+                placeholder = QLabel("    ✅ No trackers detected. Network is clean.")
+                placeholder.setFont(QFont("Segoe UI", 11))
+                placeholder.setStyleSheet(f"color: {t['accent']};")
+                placeholder.setContentsMargins(22, 15, 22, 15)
+                self._dom_rows.append(placeholder)
+                dom_layout.insertWidget(2, placeholder)
 
         # ── Category score bars ──
         def _bar_color(v):
@@ -2083,133 +2218,178 @@ class WebTrackingPage(QWidget):
             "Fingerprint": "#EF4444", "Social": "#8B5CF6",
             "Telemetry": "#F59E0B",
         }
-        for w in self._cat_legend_widgets:
-            self._cat_legend_container.removeWidget(w)
-            w.deleteLater()
-        self._cat_legend_widgets.clear()
 
-        for cat_name in ["Advertising", "Analytics", "Fingerprint",
-                         "Social", "Telemetry"]:
-            count = cat_hit_counts.get(cat_name, 0)
-            pct = f"{count / total_hits * 100:.0f}%" if total_hits > 1 else "0%"
-            color = _cat_colors_map.get(cat_name, t["text_muted"])
+        # Fix 7: Snapshot guard for category legend
+        _legend_snapshot = tuple(
+            (cat_name, cat_hit_counts.get(cat_name, 0))
+            for cat_name in ["Advertising", "Analytics", "Fingerprint", "Social", "Telemetry"]
+        )
 
-            cfr = QWidget()
-            cfl = QHBoxLayout(cfr)
-            cfl.setContentsMargins(22, 5, 22, 5)
-            clbl = QLabel(f"◉ {cat_name}")
-            clbl.setFont(QFont("Segoe UI", 11))
-            clbl.setStyleSheet(f"color: {color};")
-            cfl.addWidget(clbl)
-            cfl.addStretch()
-            cv = QLabel(f"{count}")
-            cv.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-            cv.setStyleSheet(f"color: {t['text_primary']};")
-            cfl.addWidget(cv)
-            cpct = QLabel(f"  {pct}")
-            cpct.setFont(QFont("Segoe UI", 10))
-            cpct.setStyleSheet(f"color: {t['text_secondary']};")
-            cfl.addWidget(cpct)
-            self._cat_legend_container.addWidget(cfr)
-            self._cat_legend_widgets.append(cfr)
+        if _legend_snapshot != self._last_legend_snapshot:
+            self._last_legend_snapshot = _legend_snapshot
+
+            for w in self._cat_legend_widgets:
+                self._cat_legend_container.removeWidget(w)
+                w.deleteLater()
+            self._cat_legend_widgets.clear()
+
+            for cat_name in ["Advertising", "Analytics", "Fingerprint",
+                             "Social", "Telemetry"]:
+                count = cat_hit_counts.get(cat_name, 0)
+                pct = f"{count / total_hits * 100:.0f}%" if total_hits > 1 else "0%"
+                color = _cat_colors_map.get(cat_name, t["text_muted"])
+
+                cfr = QWidget()
+                cfl = QHBoxLayout(cfr)
+                cfl.setContentsMargins(22, 5, 22, 5)
+                clbl = QLabel(f"◉ {cat_name}")
+                clbl.setFont(QFont("Segoe UI", 11))
+                clbl.setStyleSheet(f"color: {color};")
+                cfl.addWidget(clbl)
+                cfl.addStretch()
+                cv = QLabel(f"{count}")
+                cv.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+                cv.setStyleSheet(f"color: {t['text_primary']};")
+                cfl.addWidget(cv)
+                cpct = QLabel(f"  {pct}")
+                cpct.setFont(QFont("Segoe UI", 10))
+                cpct.setStyleSheet(f"color: {t['text_secondary']};")
+                cfl.addWidget(cpct)
+                self._cat_legend_container.addWidget(cfr)
+                self._cat_legend_widgets.append(cfr)
 
         # ── Fingerprint signals ──
-        for w in self._fp_widgets:
-            self._fp_container.removeWidget(w)
-            w.deleteLater()
-        self._fp_widgets.clear()
-
         detected_fps = [s for s in fp_signals if getattr(s, "detected", False)]
-        if detected_fps:
-            for sig in detected_fps:
-                sig_type = getattr(sig, "signal_type", "UNKNOWN")
-                confidence = getattr(sig, "confidence", 0)
-                desc = getattr(sig, "description", "")
-                # Icon by type
-                icon_map = {"CANVAS": "🎨", "WEBGL": "🖼️", "FONT": "🔤",
-                            "BATTERY": "🔋", "AUDIO": "🔊"}
-                icon = icon_map.get(sig_type, "🔏")
-                lbl = QLabel(
-                    f"{icon}  {sig_type} — confidence: {confidence:.0%}")
-                lbl.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-                lbl.setStyleSheet(f"color: {t['danger']};")
-                lbl.setWordWrap(True)
-                self._fp_container.addWidget(lbl)
-                self._fp_widgets.append(lbl)
-                if desc:
-                    dlbl = QLabel(f"     {desc}")
-                    dlbl.setFont(QFont("Segoe UI", 10))
-                    dlbl.setStyleSheet(f"color: {t['text_secondary']};")
-                    dlbl.setWordWrap(True)
-                    self._fp_container.addWidget(dlbl)
-                    self._fp_widgets.append(dlbl)
-        else:
-            ok = QLabel("✅  No fingerprinting attempts detected.")
-            ok.setFont(QFont("Segoe UI", 11))
-            ok.setStyleSheet(f"color: {t['accent']};")
-            self._fp_container.addWidget(ok)
-            self._fp_widgets.append(ok)
+
+        # Fix 7: Snapshot guard for fingerprint signals
+        _fp_snapshot = tuple(
+            (getattr(s, "signal_type", "UNKNOWN"),
+             getattr(s, "confidence", 0),
+             getattr(s, "description", ""))
+            for s in detected_fps
+        ) if detected_fps else ()
+
+        if _fp_snapshot != self._last_fp_snapshot:
+            self._last_fp_snapshot = _fp_snapshot
+
+            for w in self._fp_widgets:
+                self._fp_container.removeWidget(w)
+                w.deleteLater()
+            self._fp_widgets.clear()
+
+            if detected_fps:
+                for sig in detected_fps:
+                    sig_type = getattr(sig, "signal_type", "UNKNOWN")
+                    confidence = getattr(sig, "confidence", 0)
+                    desc = getattr(sig, "description", "")
+                    # Icon by type
+                    icon_map = {"CANVAS": "🎨", "WEBGL": "🖼️", "FONT": "🔤",
+                                "BATTERY": "🔋", "AUDIO": "🔊"}
+                    icon = icon_map.get(sig_type, "🔏")
+                    lbl = QLabel(
+                        f"{icon}  {sig_type} — confidence: {confidence:.0%}")
+                    lbl.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+                    lbl.setStyleSheet(f"color: {t['danger']};")
+                    lbl.setWordWrap(True)
+                    self._fp_container.addWidget(lbl)
+                    self._fp_widgets.append(lbl)
+                    if desc:
+                        dlbl = QLabel(f"     {desc}")
+                        dlbl.setFont(QFont("Segoe UI", 10))
+                        dlbl.setStyleSheet(f"color: {t['text_secondary']};")
+                        dlbl.setWordWrap(True)
+                        self._fp_container.addWidget(dlbl)
+                        self._fp_widgets.append(dlbl)
+            else:
+                ok = QLabel("✅  No fingerprinting attempts detected.")
+                ok.setFont(QFont("Segoe UI", 11))
+                ok.setStyleSheet(f"color: {t['accent']};")
+                self._fp_container.addWidget(ok)
+                self._fp_widgets.append(ok)
 
         # ── Top offenders ──
-        for w in self._offender_widgets:
-            self._offenders_container.removeWidget(w)
-            w.deleteLater()
-        self._offender_widgets.clear()
+        # Fix 7: Snapshot guard for top offenders
+        _offenders_snapshot = tuple(top_offenders[:5]) if top_offenders else ()
 
-        if top_offenders:
-            for i, domain in enumerate(top_offenders[:5], 1):
-                lbl = QLabel(f"  {i}.  {domain}")
-                lbl.setFont(QFont("Segoe UI", 11,
-                                   QFont.Weight.Bold if i <= 3
-                                   else QFont.Weight.Normal))
-                lbl.setStyleSheet(
-                    f"color: {t['danger'] if i <= 2 else t['warning'] if i <= 3 else t['text_primary']};")
-                lbl.setContentsMargins(0, 4, 0, 4)
-                self._offenders_container.addWidget(lbl)
-                self._offender_widgets.append(lbl)
-        else:
-            ok = QLabel("✅  No tracker offenders detected.")
-            ok.setFont(QFont("Segoe UI", 11))
-            ok.setStyleSheet(f"color: {t['accent']};")
-            self._offenders_container.addWidget(ok)
-            self._offender_widgets.append(ok)
+        if _offenders_snapshot != self._last_offenders_snapshot:
+            self._last_offenders_snapshot = _offenders_snapshot
+
+            for w in self._offender_widgets:
+                self._offenders_container.removeWidget(w)
+                w.deleteLater()
+            self._offender_widgets.clear()
+
+            if top_offenders:
+                for i, domain in enumerate(top_offenders[:5], 1):
+                    lbl = QLabel(f"  {i}.  {domain}")
+                    lbl.setFont(QFont("Segoe UI", 11,
+                                       QFont.Weight.Bold if i <= 3
+                                       else QFont.Weight.Normal))
+                    lbl.setStyleSheet(
+                        f"color: {t['danger'] if i <= 2 else t['warning'] if i <= 3 else t['text_primary']};")
+                    lbl.setContentsMargins(0, 4, 0, 4)
+                    self._offenders_container.addWidget(lbl)
+                    self._offender_widgets.append(lbl)
+            else:
+                ok = QLabel("✅  No tracker offenders detected.")
+                ok.setFont(QFont("Segoe UI", 11))
+                ok.setStyleSheet(f"color: {t['accent']};")
+                self._offenders_container.addWidget(ok)
+                self._offender_widgets.append(ok)
 
         # ── Recommended actions (update based on active categories) ──
-        for w in self._action_widgets:
-            self._actions_container.removeWidget(w)
-            w.deleteLater()
-        self._action_widgets.clear()
-
+        # Fix 7: Snapshot guard for recommended actions
+        _actions_parts = []
         if category_scores.get("Fingerprint", 0) >= 40:
-            w = ActionCard(None, "🔏", "Enable Fingerprint Resistance",
-                           "Set privacy.resistFingerprinting=true in Firefox.", "APPLY")
-            self._actions_container.addWidget(w)
-            self._action_widgets.append(w)
+            _actions_parts.append("fp")
         if category_scores.get("Advertising", 0) >= 50:
-            w = ActionCard(None, "🛡️", "Block Ad Networks",
-                           "Enable DNS-level ad blocking (Pi-hole, NextDNS).", "REVIEW")
-            self._actions_container.addWidget(w)
-            self._action_widgets.append(w)
+            _actions_parts.append("ad")
         if category_scores.get("Social", 0) >= 50:
-            w = ActionCard(None, "🔗", "Isolate Social Trackers",
-                           "Use Firefox containers to isolate social logins.", "REVIEW")
-            self._actions_container.addWidget(w)
-            self._action_widgets.append(w)
+            _actions_parts.append("soc")
         if category_scores.get("Telemetry", 0) >= 55:
-            w = ActionCard(None, "⚠️", "Block Telemetry",
-                           "Review app telemetry settings; block at firewall.", "REVIEW")
-            self._actions_container.addWidget(w)
-            self._action_widgets.append(w)
+            _actions_parts.append("tel")
         if category_scores.get("Analytics", 0) >= 40:
-            w = ActionCard(None, "📊", "Block Analytics Scripts",
-                           "Install uBlock Origin to block analytics trackers.", "REVIEW")
-            self._actions_container.addWidget(w)
-            self._action_widgets.append(w)
-        if not self._action_widgets:
-            w = ActionCard(None, "✅", "All Clear",
-                           "No tracker categories exceed alert thresholds.")
-            self._actions_container.addWidget(w)
-            self._action_widgets.append(w)
+            _actions_parts.append("ana")
+        _actions_snapshot = tuple(_actions_parts) if _actions_parts else ("clear",)
+
+        if _actions_snapshot != self._last_actions_snapshot:
+            self._last_actions_snapshot = _actions_snapshot
+
+            for w in self._action_widgets:
+                self._actions_container.removeWidget(w)
+                w.deleteLater()
+            self._action_widgets.clear()
+
+            if category_scores.get("Fingerprint", 0) >= 40:
+                w = ActionCard(None, "🔏", "Enable Fingerprint Resistance",
+                               "Set privacy.resistFingerprinting=true in Firefox.", "APPLY")
+                self._actions_container.addWidget(w)
+                self._action_widgets.append(w)
+            if category_scores.get("Advertising", 0) >= 50:
+                w = ActionCard(None, "🛡️", "Block Ad Networks",
+                               "Enable DNS-level ad blocking (Pi-hole, NextDNS).", "REVIEW")
+                self._actions_container.addWidget(w)
+                self._action_widgets.append(w)
+            if category_scores.get("Social", 0) >= 50:
+                w = ActionCard(None, "🔗", "Isolate Social Trackers",
+                               "Use Firefox containers to isolate social logins.", "REVIEW")
+                self._actions_container.addWidget(w)
+                self._action_widgets.append(w)
+            if category_scores.get("Telemetry", 0) >= 55:
+                w = ActionCard(None, "⚠️", "Block Telemetry",
+                               "Review app telemetry settings; block at firewall.", "REVIEW")
+                self._actions_container.addWidget(w)
+                self._action_widgets.append(w)
+            if category_scores.get("Analytics", 0) >= 40:
+                w = ActionCard(None, "📊", "Block Analytics Scripts",
+                               "Install uBlock Origin to block analytics trackers.", "REVIEW")
+                self._actions_container.addWidget(w)
+                self._action_widgets.append(w)
+            if not self._action_widgets:
+                w = ActionCard(None, "✅", "All Clear",
+                               "No tracker categories exceed alert thresholds.")
+                self._actions_container.addWidget(w)
+                self._action_widgets.append(w)
 
 
 class DonutChart(QWidget):
@@ -2388,36 +2568,6 @@ class AllActionsPage(QWidget):
             d_lbl.setStyleSheet(f"color: {t['text_secondary']};")
             fl.addWidget(d_lbl, 1)
             tbl_lay.addWidget(fr)
-        lay.addWidget(tbl)
-        fr = HoverRow(tbl)
-        fl = QHBoxLayout(fr)
-        fl.setContentsMargins(22, 10, 22, 10)
-        fl.setSpacing(5)
-        n_lbl = QLabel(name)
-        n_lbl.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-        n_lbl.setStyleSheet(f"color: {t['text_primary']};")
-        n_lbl.setFixedWidth(190)
-        fl.addWidget(n_lbl)
-        m_lbl = QLabel(mod)
-        m_lbl.setFont(QFont("Segoe UI", 11))
-        m_lbl.setStyleSheet(f"color: {t['text_secondary']};")
-        m_lbl.setFixedWidth(90)
-        fl.addWidget(m_lbl)
-        pill = PillLabel(typ, typ)
-        pill.setFixedWidth(70)
-        fl.addWidget(pill)
-        sw = ToggleSwitch(fr, checked=on)
-        fl.addWidget(sw)
-        l_lbl = QLabel(last)
-        l_lbl.setFont(QFont("Segoe UI", 11))
-        l_lbl.setStyleSheet(f"color: {t['text_secondary']};")
-        l_lbl.setFixedWidth(90)
-        fl.addWidget(l_lbl)
-        d_lbl = QLabel(desc)
-        d_lbl.setFont(QFont("Segoe UI", 11))
-        d_lbl.setStyleSheet(f"color: {t['text_secondary']};")
-        fl.addWidget(d_lbl, 1)
-        tbl_lay.addWidget(fr)
         lay.addWidget(tbl)
 
         pag = QWidget()

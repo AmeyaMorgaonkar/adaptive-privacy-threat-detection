@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QIcon
 
-from ui.theme import apply_theme, get_card_tokens, setup_fonts, build_stylesheet
+from ui.theme import apply_theme, get_card_tokens, setup_fonts, build_stylesheet, invalidate_token_cache
 from ui.glass_frame import GlassFrame
 from ui.data_bridge import DataBridge
 from ui.pages import (
@@ -349,6 +349,7 @@ class App(QMainWindow):
         """Rebuild entire stylesheet and refresh all UI components.
         Called when theme or glass setting changes from Settings page.
         """
+        invalidate_token_cache()
         apply_theme()
         GlassFrame.refresh_all()
         self.sidebar.refresh_styles()
