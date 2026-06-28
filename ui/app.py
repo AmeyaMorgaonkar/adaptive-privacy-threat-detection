@@ -191,6 +191,7 @@ class App(QMainWindow):
         self.data_bridge = data_bridge
         self.config_manager = config_manager or ConfigManager()
         self._current_page = "Dashboard"
+        self._last_stack_height = 0
 
         # Apply window icon and system tray icon
         icon_path = str(config.BASE_DIR / "assets" / "logo.ico")
@@ -304,8 +305,10 @@ class App(QMainWindow):
             return
         page.adjustSize()
         target_height = max(page.sizeHint().height(), page.minimumSizeHint().height())
-        self.page_stack.setMinimumHeight(target_height)
-        self.page_stack.setMaximumHeight(target_height)
+        if target_height != self._last_stack_height:
+            self._last_stack_height = target_height
+            self.page_stack.setMinimumHeight(target_height)
+            self.page_stack.setMaximumHeight(target_height)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -344,6 +347,7 @@ class App(QMainWindow):
                 behavioral_report=behavioral_report,
                 web_report=web_report,
             )
+
 
     def apply_full_theme(self):
         """Rebuild entire stylesheet and refresh all UI components.

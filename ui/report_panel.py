@@ -14,7 +14,7 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QWidget, QFrame, QLabel, QHBoxLayout, QVBoxLayout,
     QGridLayout, QPushButton, QScrollArea, QFileDialog,
-    QMessageBox,
+    QMessageBox, QSizePolicy,
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
@@ -362,30 +362,43 @@ class ReportPanel(QWidget):
 
             self._recs_card.update_value(str(len(recs)))
 
-            # Fix 7: Snapshot guard — skip rebuild if recs unchanged
+            # Snapshot includes description so content changes are detected
             _recs_snapshot = tuple(
-                (getattr(rec, 'title', ''), getattr(rec, 'priority', ''), getattr(rec, 'category', ''))
+                (getattr(rec, 'title', ''), getattr(rec, 'priority', ''),
+                 getattr(rec, 'category', ''), getattr(rec, 'description', ''))
                 for rec in recs
             ) if recs else ()
 
             if _recs_snapshot != self._last_recs_snapshot:
                 self._last_recs_snapshot = _recs_snapshot
 
-                # Clear existing rec widgets
-                while self._recs_container.count():
-                    child = self._recs_container.takeAt(0)
-                    if child.widget():
-                        child.widget().deleteLater()
+                # Count existing rec card widgets (GlassFrame instances)
+                existing_cards = []
+                for i in range(self._recs_container.count()):
+                    w = self._recs_container.itemAt(i).widget()
+                    if w is not None and isinstance(w, GlassFrame):
+                        existing_cards.append(w)
 
-                if recs:
-                    for rec in recs:
-                        self._recs_container.addWidget(
-                            self._build_rec_card(rec))
+                if recs and len(recs) == len(existing_cards):
+                    # In-place update: same number of cards → update text
+                    for card, rec in zip(existing_cards, recs):
+                        self._update_rec_card(card, rec)
                 else:
-                    ok = QLabel("  ✓ No hardening actions required at this time.")
-                    ok.setFont(QFont("Segoe UI", 11))
-                    ok.setStyleSheet(f"color: {t['accent']};")
-                    self._recs_container.addWidget(ok)
+                    # Count changed — full rebuild
+                    while self._recs_container.count():
+                        child = self._recs_container.takeAt(0)
+                        if child.widget():
+                            child.widget().deleteLater()
+
+                    if recs:
+                        for rec in recs:
+                            self._recs_container.addWidget(
+                                self._build_rec_card(rec))
+                    else:
+                        ok = QLabel("  ✓ No hardening actions required at this time.")
+                        ok.setFont(QFont("Segoe UI", 11))
+                        ok.setStyleSheet(f"color: {t['accent']};")
+                        self._recs_container.addWidget(ok)
 
             # Store latest report data for export
             self._last_score = score
@@ -403,50 +416,61 @@ class ReportPanel(QWidget):
     def _build_rec_card(rec) -> QWidget:
         t = _t()
         card = GlassFrame()
+        card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         card_l = QVBoxLayout(card)
         card_l.setContentsMargins(18, 14, 18, 14)
         card_l.setSpacing(6)
+        card_l.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinimumSize)
 
-        # Header: priority badge + category + title
+        # Row 1: category + title (left) — priority badge (right)
         hdr = QHBoxLayout()
         hdr.setSpacing(10)
-
-        priority = getattr(rec, "priority", rec.get("priority", "LOW")
-                           if isinstance(rec, dict) else "LOW")
-        bg, fg = _PRIORITY_COLORS.get(priority, ("#F3F4F6", "#374151"))
-        badge = QLabel(priority)
-        badge.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
-        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        badge.setFixedWidth(80)
-        badge.setStyleSheet(
-            f"background-color: {bg}; color: {fg};"
-            " border-radius: 4px; padding: 3px 8px;")
-        hdr.addWidget(badge)
 
         category = getattr(rec, "category", rec.get("category", "")
                            if isinstance(rec, dict) else "")
         cat_lbl = QLabel(f"[{category}]")
+        cat_lbl.setObjectName("recCardCategory")
         cat_lbl.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
         cat_lbl.setStyleSheet(f"color: {t['text_muted']};")
+        cat_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
         hdr.addWidget(cat_lbl)
 
         title_text = getattr(rec, "title", rec.get("title", "")
                              if isinstance(rec, dict) else "")
         title_lbl = QLabel(title_text)
+        title_lbl.setObjectName("recCardTitle")
         title_lbl.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
         title_lbl.setStyleSheet(f"color: {t['text_primary']};")
-        hdr.addWidget(title_lbl)
-        hdr.addStretch()
+        title_lbl.setWordWrap(True)
+        title_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        hdr.addWidget(title_lbl, 1)
+
+        priority = getattr(rec, "priority", rec.get("priority", "LOW")
+                           if isinstance(rec, dict) else "LOW")
+        bg, fg = _PRIORITY_COLORS.get(priority, ("#F3F4F6", "#374151"))
+        badge = QLabel(priority)
+        badge.setObjectName("recCardBadge")
+        badge.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        badge.setFixedWidth(80)
+        badge.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        badge.setStyleSheet(
+            f"background-color: {bg}; color: {fg};"
+            " border-radius: 4px; padding: 3px 8px;")
+        hdr.addWidget(badge)
+
         card_l.addLayout(hdr)
 
-        # Description
+        # Row 2: Description
         desc = getattr(rec, "description", rec.get("description", "")
                        if isinstance(rec, dict) else "")
         if desc:
             desc_lbl = QLabel(desc)
+            desc_lbl.setObjectName("recCardDesc")
             desc_lbl.setFont(QFont("Segoe UI", 10))
             desc_lbl.setStyleSheet(f"color: {t['text_secondary']};")
             desc_lbl.setWordWrap(True)
+            desc_lbl.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
             card_l.addWidget(desc_lbl)
 
         # Action steps
@@ -457,9 +481,43 @@ class ReportPanel(QWidget):
             step_lbl.setFont(QFont("Segoe UI", 9))
             step_lbl.setStyleSheet(f"color: {t['text_muted']};")
             step_lbl.setWordWrap(True)
+            step_lbl.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
             card_l.addWidget(step_lbl)
 
         return card
+
+    @staticmethod
+    def _update_rec_card(card: QWidget, rec) -> None:
+        """Update an existing recommendation card's text in place."""
+        title_lbl = card.findChild(QLabel, "recCardTitle")
+        if title_lbl:
+            title_lbl.setText(
+                getattr(rec, "title", rec.get("title", "")
+                        if isinstance(rec, dict) else ""))
+
+        cat_lbl = card.findChild(QLabel, "recCardCategory")
+        if cat_lbl:
+            category = getattr(rec, "category", rec.get("category", "")
+                               if isinstance(rec, dict) else "")
+            cat_lbl.setText(f"[{category}]")
+
+        badge = card.findChild(QLabel, "recCardBadge")
+        if badge:
+            priority = getattr(rec, "priority", rec.get("priority", "LOW")
+                               if isinstance(rec, dict) else "LOW")
+            bg, fg = _PRIORITY_COLORS.get(priority, ("#F3F4F6", "#374151"))
+            badge.setText(priority)
+            badge.setStyleSheet(
+                f"background-color: {bg}; color: {fg};"
+                " border-radius: 4px; padding: 3px 8px;")
+
+        desc_lbl = card.findChild(QLabel, "recCardDesc")
+        desc = getattr(rec, "description", rec.get("description", "")
+                       if isinstance(rec, dict) else "")
+        if desc_lbl:
+            desc_lbl.setText(desc)
+
+        card.adjustSize()
 
     # ── Session toggle ───────────────────────────────────────────────
 

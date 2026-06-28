@@ -6,6 +6,7 @@ All colors are theme-aware via get_card_tokens().
 from PySide6.QtWidgets import (
     QWidget, QFrame, QLabel, QHBoxLayout, QVBoxLayout,
     QPushButton, QProgressBar, QGraphicsOpacityEffect,
+    QSizePolicy,
 )
 from PySide6.QtCore import Qt, QRectF, Signal, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QPainter, QPen, QColor, QFont
@@ -301,39 +302,55 @@ class ActionCard(QFrame):
         super().__init__(parent)
         self.setObjectName("actionCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(15, 14, 15, 14)
         lay.setSpacing(12)
 
-        ib = QLabel(icon)
-        ib.setObjectName("actionCardIcon")
-        ib.setFont(QFont("Segoe UI", 14))
-        ib.setFixedSize(38, 38)
-        ib.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(ib)
+        self._icon_lbl = QLabel(icon)
+        self._icon_lbl.setObjectName("actionCardIcon")
+        self._icon_lbl.setFont(QFont("Segoe UI", 14))
+        self._icon_lbl.setFixedSize(38, 38)
+        self._icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self._icon_lbl)
 
         txt = QVBoxLayout()
         txt.setSpacing(2)
-        t_lbl = QLabel(title)
-        t_lbl.setObjectName("actionCardTitle")
-        t_lbl.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-        txt.addWidget(t_lbl)
-        s_lbl = QLabel(subtitle)
-        s_lbl.setObjectName("actionCardSubtitle")
-        s_lbl.setFont(QFont("Segoe UI", 9))
-        s_lbl.setWordWrap(True)
-        s_lbl.setMaximumWidth(320)
-        txt.addWidget(s_lbl)
+        self._title_lbl = QLabel(title)
+        self._title_lbl.setObjectName("actionCardTitle")
+        self._title_lbl.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        self._title_lbl.setWordWrap(True)
+        self._title_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        txt.addWidget(self._title_lbl)
+        self._sub_lbl = QLabel(subtitle)
+        self._sub_lbl.setObjectName("actionCardSubtitle")
+        self._sub_lbl.setFont(QFont("Segoe UI", 9))
+        self._sub_lbl.setWordWrap(True)
+        self._sub_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        txt.addWidget(self._sub_lbl)
         lay.addLayout(txt, 1)
 
+        self._badge = None
         if badge_text:
-            p = PillLabel(badge_text, badge_text)
-            lay.addWidget(p)
+            self._badge = PillLabel(badge_text, badge_text)
+            lay.addWidget(self._badge)
         else:
             chev = QLabel("›")
             chev.setObjectName("actionCardChevron")
             chev.setFont(QFont("Segoe UI", 18))
             lay.addWidget(chev)
+
+    def update_content(self, icon=None, title=None, subtitle=None, badge_text=None):
+        """Update card text in place without recreating the widget."""
+        if icon is not None:
+            self._icon_lbl.setText(icon)
+        if title is not None:
+            self._title_lbl.setText(title)
+        if subtitle is not None:
+            self._sub_lbl.setText(subtitle)
+        if badge_text is not None and self._badge is not None:
+            self._badge.setText(badge_text)
+        self.adjustSize()
 
     def mousePressEvent(self, event):
         self.clicked.emit()

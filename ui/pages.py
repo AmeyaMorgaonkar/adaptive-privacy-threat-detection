@@ -820,39 +820,55 @@ class DashboardPage(QWidget):
                 hardening_recs = list(hardening_recs)  # prevent mutation of cached value
                 self._hardening_analysis_cache = (_hardening_input_snapshot, hardening_recs)
 
-            # Fix 7: Snapshot guard — skip rebuild if recs unchanged
+            # Snapshot includes description so content changes are detected
             _recs_snapshot = tuple(
-                (rec.title, rec.priority, rec.category) for rec in hardening_recs
+                (rec.title, rec.priority, rec.category, rec.description) for rec in hardening_recs
             ) if hardening_recs else ()
 
             if _recs_snapshot != self._last_recs_snapshot:
                 self._last_recs_snapshot = _recs_snapshot
 
-                # Clear previous items
-                while self._recommended_layout.count():
-                    item = self._recommended_layout.takeAt(0)
-                    w = item.widget()
-                    if w is not None:
-                        w.deleteLater()
+                cat_icons = {
+                    "WIFI": "📶",
+                    "PROCESSES": "⚙️",
+                    "BROWSER": "🌐",
+                    "SYSTEM": "🖥️"
+                }
 
-                if not hardening_recs:
-                    lbl = QLabel("✅ No recommended actions required.")
-                    lbl.setFont(QFont("Segoe UI", 11))
-                    lbl.setStyleSheet(f"color: {_t()['accent']};")
-                    self._recommended_layout.addWidget(lbl)
-                else:
-                    cat_icons = {
-                        "WIFI": "📶",
-                        "PROCESSES": "⚙️",
-                        "BROWSER": "🌐",
-                        "SYSTEM": "🖥️"
-                    }
-                    for rec in hardening_recs:
+                # Count existing ActionCard widgets
+                existing_cards = []
+                for i in range(self._recommended_layout.count()):
+                    w = self._recommended_layout.itemAt(i).widget()
+                    if w is not None and isinstance(w, ActionCard):
+                        existing_cards.append(w)
+
+                if hardening_recs and len(hardening_recs) == len(existing_cards):
+                    # In-place update: same number of cards → just update text
+                    for card, rec in zip(existing_cards, hardening_recs):
                         icon = cat_icons.get(rec.category.upper(), "🛡️")
-                        title = rec.title
-                        sub = rec.description
-                        tag = rec.priority  # E.g., IMMEDIATE, HIGH, MEDIUM, LOW
-                        self._recommended_layout.addWidget(ActionCard(self._recommended_widget, icon, title, sub, tag))
+                        card.update_content(icon=icon, title=rec.title,
+                                            subtitle=rec.description,
+                                            badge_text=rec.priority)
+                else:
+                    # Count changed — full rebuild
+                    while self._recommended_layout.count():
+                        item = self._recommended_layout.takeAt(0)
+                        w = item.widget()
+                        if w is not None:
+                            w.deleteLater()
+
+                    if not hardening_recs:
+                        lbl = QLabel("✅ No recommended actions required.")
+                        lbl.setFont(QFont("Segoe UI", 11))
+                        lbl.setStyleSheet(f"color: {_t()['accent']};")
+                        self._recommended_layout.addWidget(lbl)
+                    else:
+                        for rec in hardening_recs:
+                            icon = cat_icons.get(rec.category.upper(), "🛡️")
+                            title = rec.title
+                            sub = rec.description
+                            tag = rec.priority
+                            self._recommended_layout.addWidget(ActionCard(self._recommended_widget, icon, title, sub, tag))
         except Exception as exc:
             log.error("Failed to generate recommendations: %s", exc)
             try:
